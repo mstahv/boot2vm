@@ -6,6 +6,22 @@ Raw virtual machines are very cheap and efficient way to deploy apps — no cont
 
 While the name says "VM", the tool is not technically tied to virtual machines or Ubuntu — any Debian-based server with `apt` should work. Tested successfully against Raspberry Pi OS as well.
 
+### Pros
+
+ * No OCI containers or Kubernetes — zero container overhead, no image registry, no need to think about how to build, ship, or compose images.
+ * Builds run on your CI server or workstation, not on the deployment target (unlike some self-hosted PaaS solutions running on the same machine).
+ * Very fast redeployments — only your own code gets rsynced, dependency jars stay untouched, then the JVM restarts. Works great with the exploded-jar format of Spring Boot and Quarkus.
+ * Easy to inspect and debug — the app is just a JVM process; SSH in and use familiar Linux tools (`ps`, `top`, `journalctl`) directly, with no container abstraction layer in the way.
+ * Minimal moving parts.
+
+### Cons
+
+ * No container isolation — slightly reduced security boundary, though this setup assumes a dedicated VM per service anyway.
+ * One server per service.
+ * No horizontal scaling.
+ * No versioned rollback — there is no previous image to revert to; rolling back requires rebuilding an older artifact from source.
+ * No resource limits — unlike containers, there is no built-in CPU or memory cap per service; a runaway process can starve the whole machine.
+
 ## Installation
 
 ```bash
@@ -57,8 +73,6 @@ Admin SSH user [root]:
 HTTPS [yes]:
 Reverse proxy (caddy/none) [caddy]:
 App type (spring-boot/quarkus) [spring-boot]:
-```
-
 Only the host is required — sensible defaults are derived for the rest. The server setup:
 
  1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot when required
@@ -70,12 +84,11 @@ Only the host is required — sensible defaults are derived for the rest. The se
 
 ### `Deploy deploy` (default)
 
-Builds and deploys the app. This is the default command — running `Deploy` with no arguments is equivalent to `Deploy deploy`.
+Builds and deploys the app. This is the default command — running `Deploy` (with no arguments is equivalent to `Deploy deploy`).
 
  1. Runs the build (`./mvnw package`, `./gradlew bootJar` or `quarkusBuild`, auto-detected)
  2. **Spring Boot:** extracts the fat jar for [efficient rsync](https://docs.spring.io/spring-boot/reference/packaging/efficient.html); **Quarkus:** uses the already-exploded `target/quarkus-app` directly
  3. Rsyncs to the server — only changed files are transferred (dependency jars rarely change)
- 4. Restarts the systemd service
 
 ### `Deploy logs`
 
@@ -89,34 +102,13 @@ Adds an SSH public key to the app user's `authorized_keys` on the server, granti
 
 Removes the deployed application from the server: stops and removes the systemd service, resets the Caddy config (if used), and deletes the app user and its home directory. JDK, Caddy, and other system packages are left installed. Useful for testing or starting fresh — run `Deploy init` again afterwards to re-provision.
 
-## Configuration: `vmhosting.conf`
-
-Created by `Deploy init`. Placed in the project root, simple key=value format:
-
-```
-HOST=myapp.example.com
-USER=myapp
-DOMAIN=myapp.example.com
-SSH_KEY=~/.ssh/id_rsa.pub
 ADMIN_USER=root
 PROXY=caddy
 APP_TYPE=spring-boot
-```
-
- * `HOST` – VM hostname or IP for SSH/rsync connections
- * `USER` – Linux user that will own and run the app (created during init)
- * `DOMAIN` – Domain name for Caddy HTTPS (defaults to HOST)
  * `SSH_KEY` – Path to SSH public key (private key is derived automatically)
  * `ADMIN_USER` – SSH user for server admin commands (uses sudo if not root)
  * `PROXY` – Reverse proxy to install: `caddy` (default) or `none`
  * `APP_TYPE` – Application type: `spring-boot` (default) or `quarkus` (auto-detected from build files)
-
-## Demo: from zero to production in 60 seconds
-
-Create a Vaadin web app, initialize a VM, and deploy — all in one go:
-
-```bash
-# Install boot2vm
 jbang app install https://github.com/mstahv/boot2vm/blob/main/Deploy.java
 
 # Scaffold a new Vaadin + Spring Boot app
