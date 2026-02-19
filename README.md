@@ -2,7 +2,7 @@
 
 Raw virtual machines are very cheap and efficient way to deploy apps — no containers, no orchestrators, no cloud vendor lock-in.
 
-**boot2vm** is a single-file [JBang](https://www.jbang.dev/) tool that configures a fresh server for simple hosting setup and deploys Spring Boot apps to it. Just SSH, rsync, systemd, and Caddy (as reverse proxy). That's it.
+**boot2vm** is a single-file [JBang](https://www.jbang.dev/) tool that configures a fresh server for simple hosting setup and deploys Spring Boot and Quarkus apps to it. Just SSH, rsync, systemd, and Caddy (as reverse proxy). That's it.
 
 While the name says "VM", the tool is not technically tied to virtual machines or Ubuntu — any Debian-based server with `apt` should work. Tested successfully against Raspberry Pi OS as well.
 
@@ -28,7 +28,7 @@ jbang https://github.com/mstahv/boot2vm/blob/main/Deploy.java <command>
 
 ## Usage
 
-Run commands from your Spring Boot project directory:
+Run commands from your project directory:
 
 ```bash
 # First time: interactively configure and set up the server
@@ -56,6 +56,7 @@ SSH public key [~/.ssh/id_rsa.pub]:
 Admin SSH user [root]:
 HTTPS [yes]:
 Reverse proxy (caddy/none) [caddy]:
+App type (spring-boot/quarkus) [spring-boot]:
 ```
 
 Only the host is required — sensible defaults are derived for the rest. The server setup:
@@ -71,9 +72,9 @@ Only the host is required — sensible defaults are derived for the rest. The se
 
 Builds and deploys the app. This is the default command — running `Deploy` with no arguments is equivalent to `Deploy deploy`.
 
- 1. Runs `./mvnw -DskipTests package` (or `./gradlew -x test bootJar`, auto-detected)
- 2. Extracts the fat jar locally for [efficient deployment](https://docs.spring.io/spring-boot/reference/packaging/efficient.html)
- 3. Rsyncs to the server — only changed files are transferred (dependency jars in `lib/` rarely change)
+ 1. Runs the build (`./mvnw package`, `./gradlew bootJar` or `quarkusBuild`, auto-detected)
+ 2. **Spring Boot:** extracts the fat jar for [efficient rsync](https://docs.spring.io/spring-boot/reference/packaging/efficient.html); **Quarkus:** uses the already-exploded `target/quarkus-app` directly
+ 3. Rsyncs to the server — only changed files are transferred (dependency jars rarely change)
  4. Restarts the systemd service
 
 ### `Deploy logs`
@@ -84,9 +85,13 @@ Tails the application journal output via SSH.
 
 Adds an SSH public key to the app user's `authorized_keys` on the server, granting deploy access to a colleague or CI server. Pass a key file path as argument, or run without arguments to paste a key directly. Duplicate keys are detected and skipped.
 
+### `Deploy clean`
+
+Removes the deployed application from the server: stops and removes the systemd service, resets the Caddy config (if used), and deletes the app user and its home directory. JDK, Caddy, and other system packages are left installed. Useful for testing or starting fresh — run `Deploy init` again afterwards to re-provision.
+
 ## Configuration: `vmhosting.conf`
 
-Created by `Deploy init`. Placed in the Spring Boot project root, simple key=value format:
+Created by `Deploy init`. Placed in the project root, simple key=value format:
 
 ```
 HOST=myapp.example.com
@@ -95,6 +100,7 @@ DOMAIN=myapp.example.com
 SSH_KEY=~/.ssh/id_rsa.pub
 ADMIN_USER=root
 PROXY=caddy
+APP_TYPE=spring-boot
 ```
 
  * `HOST` – VM hostname or IP for SSH/rsync connections
@@ -103,6 +109,7 @@ PROXY=caddy
  * `SSH_KEY` – Path to SSH public key (private key is derived automatically)
  * `ADMIN_USER` – SSH user for server admin commands (uses sudo if not root)
  * `PROXY` – Reverse proxy to install: `caddy` (default) or `none`
+ * `APP_TYPE` – Application type: `spring-boot` (default) or `quarkus` (auto-detected from build files)
 
 ## Demo: from zero to production in 60 seconds
 
@@ -130,7 +137,6 @@ Deploy logs       # watch it run
 
 ## For later
 
- * Support Quarkus apps
  * Nginx as an alternative reverse proxy option
  * Blue-green deployment for zero-downtime restarts
  * Sticky sessions allowing old users to stay on the previous version during rollout

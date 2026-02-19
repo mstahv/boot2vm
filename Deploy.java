@@ -8,7 +8,7 @@ import java.util.*;
 
 public class Deploy {
 
-    static String host, user, domain, sshKey, adminUser, proxy;
+    static String host, user, domain, sshKey, adminUser, proxy, appType;
     static boolean https;
 
     static final String SETUP_SCRIPT = """
@@ -19,6 +19,7 @@ public class Deploy {
             ADMIN_USER="${3:-root}"
             HTTPS="${4:-yes}"
             PROXY="${5:-caddy}"
+            APP_TYPE="${6:-spring-boot}"
             echo "=== Setting up server for user '$APP_USER' with domain '$DOMAIN' ==="
 
             # 1. Automatic security updates with nightly reboot if required
@@ -62,18 +63,23 @@ public class Deploy {
             mkdir -p "/home/$APP_USER/app"
             chown "$APP_USER:$APP_USER" "/home/$APP_USER/app"
 
-            # 5. Systemd service for the Spring Boot application
+            # 5. Systemd service for the application
             echo "--- Installing systemd service ---"
+            if [ "$APP_TYPE" = "quarkus" ]; then
+                EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/quarkus-app/quarkus-run.jar"
+            else
+                EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/$APP_USER.jar"
+            fi
             cat > "/etc/systemd/system/$APP_USER.service" << UNIT
             [Unit]
-            Description=Spring Boot Application ($APP_USER)
+            Description=Java Application ($APP_USER)
             After=network.target
 
             [Service]
             Type=simple
             User=$APP_USER
             WorkingDirectory=/home/$APP_USER/app
-            ExecStart=/usr/bin/java -jar /home/$APP_USER/app/$APP_USER.jar
+            ExecStart=$EXEC_START
             Restart=on-failure
             RestartSec=10
 
@@ -122,6 +128,7 @@ public class Deploy {
             case "deploy" -> { loadConfig(); deploy(); }
             case "logs" -> { loadConfig(); logs(args); }
             case "add-key" -> { loadConfig(); addKey(args); }
+            case "clean" -> { loadConfig(); clean(); }
             default -> {
                 System.err.println("Unknown command: " + command);
                 printUsage();
@@ -138,6 +145,7 @@ public class Deploy {
         System.out.println("  deploy         - Build, sync, and restart the app");
         System.out.println("  logs [n]       - Tail the application logs (default: 200 lines)");
         System.out.println("  add-key [file] - Add an SSH public key to the server");
+        System.out.println("  clean          - Remove the app, service, and user from the server");
     }
 
     static void loadConfig() throws IOException {
@@ -157,6 +165,7 @@ public class Deploy {
         adminUser = props.getProperty("ADMIN_USER", "root");
         https = !"no".equalsIgnoreCase(props.getProperty("HTTPS", "yes"));
         proxy = props.getProperty("PROXY", "caddy");
+        appType = props.getProperty("APP_TYPE", "spring-boot");
 
         if (sshKey.endsWith(".pub")) {
             sshKey = sshKey.substring(0, sshKey.length() - 4);
@@ -184,7 +193,8 @@ public class Deploy {
         // Load existing config as defaults if available
         Path configPath = Path.of("vmhosting.conf");
         String defaultHost = null, defaultUser = null, defaultDomain = null,
-                defaultKey = null, defaultAdmin = null, defaultHttps = null, defaultProxy = null;
+                defaultKey = null, defaultAdmin = null, defaultHttps = null,
+                defaultProxy = null, defaultAppType = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -197,6 +207,7 @@ public class Deploy {
             defaultAdmin = props.getProperty("ADMIN_USER");
             defaultHttps = props.getProperty("HTTPS");
             defaultProxy = props.getProperty("PROXY");
+            defaultAppType = props.getProperty("APP_TYPE");
         }
 
         // HOST (required)
@@ -221,6 +232,8 @@ public class Deploy {
         https = httpsStr.equalsIgnoreCase("yes");
         proxy = prompt(console, "Reverse proxy (caddy/none)",
                 defaultProxy != null ? defaultProxy : "caddy");
+        appType = prompt(console, "App type (spring-boot/quarkus)",
+                defaultAppType != null ? defaultAppType : detectAppType());
 
         // Write vmhosting.conf
         Files.writeString(configPath,
@@ -230,7 +243,8 @@ public class Deploy {
                 + "SSH_KEY=" + sshKeyRaw + "\n"
                 + "ADMIN_USER=" + adminUser + "\n"
                 + "HTTPS=" + (https ? "yes" : "no") + "\n"
-                + "PROXY=" + proxy + "\n");
+                + "PROXY=" + proxy + "\n"
+                + "APP_TYPE=" + appType + "\n");
         System.out.println("Wrote vmhosting.conf");
 
         // Resolve the private key path for SSH connections (strip .pub if present)
@@ -251,7 +265,7 @@ public class Deploy {
         scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/setup-server.sh");
         sshAsRoot("chmod +x /tmp/setup-server.sh");
         sshAsRoot("/tmp/setup-server.sh "
-                + user + " " + domain + " " + adminUser + " " + (https ? "yes" : "no") + " " + proxy);
+                + user + " " + domain + " " + adminUser + " " + (https ? "yes" : "no") + " " + proxy + " " + appType);
 
         Files.delete(tempScript);
         System.out.println("Server initialized successfully.\n");
@@ -269,7 +283,7 @@ public class Deploy {
     }
 
     // -----------------------------------------------------------------------
-    // deploy – build, extract, rsync, restart
+    // deploy – build, sync, restart
     // -----------------------------------------------------------------------
     static void deploy() throws Exception {
         // 1. Build
@@ -278,52 +292,60 @@ public class Deploy {
         boolean gradlew = Files.exists(Path.of("gradlew"));
         boolean pom = Files.exists(Path.of("pom.xml"));
         boolean gradle = Files.exists(Path.of("build.gradle")) || Files.exists(Path.of("build.gradle.kts"));
+        boolean quarkus = "quarkus".equals(appType);
 
         if (mavenw) {
             run("./mvnw", "-DskipTests", "package");
         } else if (gradlew) {
-            run("./gradlew", "-x", "test", "bootJar");
+            run("./gradlew", "-x", "test", quarkus ? "quarkusBuild" : "bootJar");
         } else if (pom) {
             run("mvn", "-DskipTests", "package");
         } else if (gradle) {
-            run("gradle", "-x", "test", "bootJar");
+            run("gradle", "-x", "test", quarkus ? "quarkusBuild" : "bootJar");
         } else {
             System.err.println("No Maven or Gradle project found in current directory");
             System.exit(1);
         }
 
-        // 2. Locate the built fat jar
-        Path jarDir = (mavenw || pom) ? Path.of("target") : Path.of("build", "libs");
-        Path jar = findJar(jarDir);
-        System.out.println("Found jar: " + jar);
-
-        // 3. Extract for efficient rsync (lib/ changes rarely)
-        Path extracted = Path.of("target", "extracted");
-        if (Files.exists(extracted)) {
-            deleteRecursively(extracted);
-        }
-        run("java", "-Djarmode=tools", "-jar", jar.toString(),
-                "extract", "--destination", extracted.toString());
-
-        // The extract command may place files directly in extracted/ or in a
-        // subdirectory. Find the directory that contains lib/.
-        Path extractRoot = findExtractedRoot(extracted);
-
-        // 4. Rename the application jar to $USER.jar
-        Path extractedJar = findJar(extractRoot);
-        Path renamedJar = extractRoot.resolve(user + ".jar");
-        if (!extractedJar.getFileName().toString().equals(user + ".jar")) {
-            Files.move(extractedJar, renamedJar, StandardCopyOption.REPLACE_EXISTING);
-        }
-
-        // 5. Rsync to server – only changed bytes are transferred
+        // 2. Prepare and sync to server
         System.out.println("Syncing to server ...");
-        run("rsync", "-az", "--delete", "--stats",
-                "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
-                extractRoot + "/",
-                user + "@" + host + ":/home/" + user + "/app/");
+        String syncSource;
 
-        // 6. Restart the systemd service
+        if (quarkus) {
+            // Quarkus builds an already-exploded app in target/quarkus-app
+            syncSource = "target/quarkus-app";
+            run("rsync", "-az", "--delete", "--stats",
+                    "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
+                    syncSource,
+                    user + "@" + host + ":/home/" + user + "/app/");
+        } else {
+            // Spring Boot: extract fat jar for efficient rsync (lib/ changes rarely)
+            Path jarDir = (mavenw || pom) ? Path.of("target") : Path.of("build", "libs");
+            Path jar = findJar(jarDir);
+            System.out.println("Found jar: " + jar);
+
+            Path extracted = Path.of("target", "extracted");
+            if (Files.exists(extracted)) {
+                deleteRecursively(extracted);
+            }
+            run("java", "-Djarmode=tools", "-jar", jar.toString(),
+                    "extract", "--destination", extracted.toString());
+
+            Path extractRoot = findExtractedRoot(extracted);
+
+            Path extractedJar = findJar(extractRoot);
+            Path renamedJar = extractRoot.resolve(user + ".jar");
+            if (!extractedJar.getFileName().toString().equals(user + ".jar")) {
+                Files.move(extractedJar, renamedJar, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            run("rsync", "-az", "--delete", "--stats",
+                    "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
+                    extractRoot + "/",
+                    user + "@" + host + ":/home/" + user + "/app/");
+        }
+
+        // 3. Restart the systemd service
         System.out.println("Restarting service ...");
         sshAsRoot("systemctl restart " + user);
 
@@ -395,8 +417,64 @@ public class Deploy {
     }
 
     // -----------------------------------------------------------------------
+    // clean – remove app, service, proxy config, and user from the server
+    // -----------------------------------------------------------------------
+    static final String CLEAN_SCRIPT = """
+            #!/bin/bash
+            APP_USER="$1"
+            PROXY="$2"
+
+            echo "--- Stopping and removing service ---"
+            systemctl stop "$APP_USER" 2>/dev/null || true
+            systemctl disable "$APP_USER" 2>/dev/null || true
+            rm -f "/etc/systemd/system/$APP_USER.service"
+            systemctl daemon-reload
+
+            if [ "$PROXY" = "caddy" ] && [ -f /etc/caddy/Caddyfile ]; then
+                echo "--- Resetting Caddy config ---"
+                echo '# empty' > /etc/caddy/Caddyfile
+                systemctl reload caddy 2>/dev/null || true
+            fi
+
+            echo "--- Removing user and home directory ---"
+            userdel -r "$APP_USER" 2>/dev/null || true
+
+            echo "=== Clean complete! ==="
+            """;
+
+    static void clean() throws Exception {
+        System.out.println("Cleaning up " + user + " from " + host + " ...");
+
+        Path tempScript = Files.createTempFile("clean-server", ".sh");
+        Files.writeString(tempScript, CLEAN_SCRIPT);
+
+        scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/clean-server.sh");
+        sshAsRoot("chmod +x /tmp/clean-server.sh");
+        sshAsRoot("/tmp/clean-server.sh " + user + " " + proxy);
+
+        Files.delete(tempScript);
+
+        Files.deleteIfExists(Path.of("vmhosting.conf"));
+        System.out.println("Server cleaned and vmhosting.conf removed. Run 'init' to start fresh.");
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    static String detectAppType() {
+        try {
+            for (String buildFile : List.of("pom.xml", "build.gradle", "build.gradle.kts")) {
+                Path path = Path.of(buildFile);
+                if (Files.exists(path) && Files.readString(path).contains("quarkus")) {
+                    return "quarkus";
+                }
+            }
+        } catch (IOException e) {
+            // fall through to default
+        }
+        return "spring-boot";
+    }
 
     static Path findJar(Path dir) throws IOException {
         try (var files = Files.list(dir)) {
