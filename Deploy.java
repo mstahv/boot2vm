@@ -9,7 +9,7 @@ import java.util.*;
 public class Deploy {
 
     static String host, user, domain, sshKey, adminUser, proxy, appType;
-    static boolean https;
+    static boolean https, blueGreen;
 
     static final String SETUP_SCRIPT = """
             #!/bin/bash
@@ -20,7 +20,15 @@ public class Deploy {
             HTTPS="${4:-yes}"
             PROXY="${5:-caddy}"
             APP_TYPE="${6:-spring-boot}"
+            BLUE_GREEN="${7:-no}"
             echo "=== Setting up server for user '$APP_USER' with domain '$DOMAIN' ==="
+
+            # Wait for any background apt/dpkg process to release the lock
+            echo "--- Waiting for package manager lock ---"
+            while ! flock -n /var/lib/dpkg/lock-frontend true 2>/dev/null; do
+                echo "  Package manager is busy, retrying in 10s ..."
+                sleep 10
+            done
 
             # 1. Automatic security updates with nightly reboot if required
             echo "--- Configuring unattended-upgrades ---"
@@ -58,19 +66,56 @@ public class Deploy {
             chmod 700 "/home/$APP_USER/.ssh"
             chmod 600 "/home/$APP_USER/.ssh/authorized_keys"
 
-            # 4. Create application working directory
-            echo "--- Creating app directory ---"
-            mkdir -p "/home/$APP_USER/app"
-            chown "$APP_USER:$APP_USER" "/home/$APP_USER/app"
-
-            # 5. Systemd service for the application
-            echo "--- Installing systemd service ---"
-            if [ "$APP_TYPE" = "quarkus" ]; then
-                EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/quarkus-app/quarkus-run.jar"
+            # 4. Create application working directory/directories
+            echo "--- Creating app directory/directories ---"
+            if [ "$BLUE_GREEN" = "yes" ]; then
+                mkdir -p "/home/$APP_USER/app-blue" "/home/$APP_USER/app-green"
+                chown "$APP_USER:$APP_USER" "/home/$APP_USER/app-blue" "/home/$APP_USER/app-green"
+                echo "blue" > "/home/$APP_USER/active"
+                chown "$APP_USER:$APP_USER" "/home/$APP_USER/active"
             else
-                EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/$APP_USER.jar"
+                mkdir -p "/home/$APP_USER/app"
+                chown "$APP_USER:$APP_USER" "/home/$APP_USER/app"
             fi
-            cat > "/etc/systemd/system/$APP_USER.service" << UNIT
+
+            # 5. Systemd service(s) for the application
+            echo "--- Installing systemd service(s) ---"
+            if [ "$BLUE_GREEN" = "yes" ]; then
+                for SLOT in blue green; do
+                    if [ "$SLOT" = "blue" ]; then SLOT_PORT=8080; else SLOT_PORT=8081; fi
+                    if [ "$APP_TYPE" = "quarkus" ]; then
+                        EXEC_START="/usr/bin/java -jar /home/$APP_USER/app-$SLOT/quarkus-app/quarkus-run.jar"
+                    else
+                        EXEC_START="/usr/bin/java -jar /home/$APP_USER/app-$SLOT/$APP_USER.jar"
+                    fi
+                    cat > "/etc/systemd/system/$APP_USER-$SLOT.service" << UNIT
+            [Unit]
+            Description=Java Application ($APP_USER/$SLOT)
+            After=network.target
+
+            [Service]
+            Type=simple
+            User=$APP_USER
+            WorkingDirectory=/home/$APP_USER/app-$SLOT
+            Environment=SERVER_PORT=$SLOT_PORT
+            Environment=QUARKUS_HTTP_PORT=$SLOT_PORT
+            ExecStart=$EXEC_START
+            Restart=on-failure
+            RestartSec=10
+
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+                done
+                systemctl daemon-reload
+                systemctl enable "$APP_USER-blue"
+            else
+                if [ "$APP_TYPE" = "quarkus" ]; then
+                    EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/quarkus-app/quarkus-run.jar"
+                else
+                    EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/$APP_USER.jar"
+                fi
+                cat > "/etc/systemd/system/$APP_USER.service" << UNIT
             [Unit]
             Description=Java Application ($APP_USER)
             After=network.target
@@ -86,8 +131,9 @@ public class Deploy {
             [Install]
             WantedBy=multi-user.target
             UNIT
-            systemctl daemon-reload
-            systemctl enable "$APP_USER"
+                systemctl daemon-reload
+                systemctl enable "$APP_USER"
+            fi
 
             # 6. Install reverse proxy (if configured)
             if [ "$PROXY" = "caddy" ]; then
@@ -118,6 +164,95 @@ public class Deploy {
             fi
 
             echo "=== Server setup complete! ==="
+            """;
+
+    static final String BLUE_GREEN_SWAP_SCRIPT = """
+            #!/bin/bash
+            set -euo pipefail
+            APP_USER="$1"
+            PROXY="${2:-caddy}"
+            HTTPS="${3:-yes}"
+            DOMAIN="$4"
+
+            LOCK_DIR="/home/$APP_USER/deploy.lock"
+            ACTIVE_FILE="/home/$APP_USER/active"
+
+            # Acquire lock atomically — mkdir is atomic on local filesystems
+            if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+                echo "ERROR: Another deploy is in progress. Remove $LOCK_DIR to force-unlock." >&2
+                exit 1
+            fi
+            trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+            # Read current active slot (default to blue if file missing)
+            ACTIVE=$(cat "$ACTIVE_FILE" 2>/dev/null || echo blue)
+            if [ "$ACTIVE" = "blue" ]; then
+                INACTIVE="green"
+                INACTIVE_PORT=8081
+            else
+                INACTIVE="blue"
+                INACTIVE_PORT=8080
+            fi
+
+            echo "Active slot: $ACTIVE, deploying to: $INACTIVE (port $INACTIVE_PORT)"
+
+            INACTIVE_SERVICE="$APP_USER-$INACTIVE"
+            ACTIVE_SERVICE="$APP_USER-$ACTIVE"
+
+            # Stop inactive service in case it is lingering from a failed previous deploy
+            systemctl stop "$INACTIVE_SERVICE" 2>/dev/null || true
+
+            # Start the new version
+            echo "--- Starting $INACTIVE_SERVICE ---"
+            systemctl start "$INACTIVE_SERVICE"
+
+            # Health check: wait up to 60 seconds for any HTTP response on the new port
+            echo "--- Health check on port $INACTIVE_PORT (up to 60s) ---"
+            HEALTHY=0
+            for i in $(seq 1 30); do
+                if curl -s --max-time 3 -o /dev/null "http://localhost:$INACTIVE_PORT/" 2>/dev/null; then
+                    HEALTHY=1
+                    echo "App responded after $((i * 2))s"
+                    break
+                fi
+                sleep 2
+            done
+
+            if [ "$HEALTHY" = "0" ]; then
+                echo "ERROR: Health check failed after 60s — rolling back" >&2
+                systemctl stop "$INACTIVE_SERVICE" || true
+                exit 1
+            fi
+
+            # Swap traffic at the reverse proxy
+            if [ "$PROXY" = "caddy" ]; then
+                echo "--- Swapping Caddy to port $INACTIVE_PORT ---"
+                if [ "$HTTPS" = "yes" ]; then
+                    cat > /etc/caddy/Caddyfile << CADDY
+            $DOMAIN {
+                reverse_proxy localhost:$INACTIVE_PORT
+            }
+            CADDY
+                else
+                    cat > /etc/caddy/Caddyfile << CADDY
+            http://$DOMAIN {
+                reverse_proxy localhost:$INACTIVE_PORT
+            }
+            CADDY
+                fi
+                systemctl reload caddy
+            fi
+
+            # Stop old service, enable new active slot for boot, disable old
+            echo "--- Stopping $ACTIVE_SERVICE ---"
+            systemctl stop "$ACTIVE_SERVICE" || true
+            systemctl enable "$INACTIVE_SERVICE"
+            systemctl disable "$ACTIVE_SERVICE" || true
+
+            # Write new active marker
+            echo "$INACTIVE" > "$ACTIVE_FILE"
+
+            echo "=== Blue-green deploy complete! Active slot: $INACTIVE (port $INACTIVE_PORT) ==="
             """;
 
     public static void main(String[] args) throws Exception {
@@ -166,6 +301,7 @@ public class Deploy {
         https = !"no".equalsIgnoreCase(props.getProperty("HTTPS", "yes"));
         proxy = props.getProperty("PROXY", "caddy");
         appType = props.getProperty("APP_TYPE", "spring-boot");
+        blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
 
         if (sshKey.endsWith(".pub")) {
             sshKey = sshKey.substring(0, sshKey.length() - 4);
@@ -194,7 +330,7 @@ public class Deploy {
         Path configPath = Path.of("vmhosting.conf");
         String defaultHost = null, defaultUser = null, defaultDomain = null,
                 defaultKey = null, defaultAdmin = null, defaultHttps = null,
-                defaultProxy = null, defaultAppType = null;
+                defaultProxy = null, defaultAppType = null, defaultBlueGreen = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -208,6 +344,7 @@ public class Deploy {
             defaultHttps = props.getProperty("HTTPS");
             defaultProxy = props.getProperty("PROXY");
             defaultAppType = props.getProperty("APP_TYPE");
+            defaultBlueGreen = props.getProperty("BLUE_GREEN");
         }
 
         // HOST (required)
@@ -234,6 +371,9 @@ public class Deploy {
                 defaultProxy != null ? defaultProxy : "caddy");
         appType = prompt(console, "App type (spring-boot/quarkus)",
                 defaultAppType != null ? defaultAppType : detectAppType());
+        String blueGreenStr = prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
+                defaultBlueGreen != null ? defaultBlueGreen : "no");
+        blueGreen = "yes".equalsIgnoreCase(blueGreenStr);
 
         // Write vmhosting.conf
         Files.writeString(configPath,
@@ -244,7 +384,8 @@ public class Deploy {
                 + "ADMIN_USER=" + adminUser + "\n"
                 + "HTTPS=" + (https ? "yes" : "no") + "\n"
                 + "PROXY=" + proxy + "\n"
-                + "APP_TYPE=" + appType + "\n");
+                + "APP_TYPE=" + appType + "\n"
+                + "BLUE_GREEN=" + (blueGreen ? "yes" : "no") + "\n");
         System.out.println("Wrote vmhosting.conf");
 
         // Resolve the private key path for SSH connections (strip .pub if present)
@@ -265,7 +406,8 @@ public class Deploy {
         scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/setup-server.sh");
         sshAsRoot("chmod +x /tmp/setup-server.sh");
         sshAsRoot("/tmp/setup-server.sh "
-                + user + " " + domain + " " + adminUser + " " + (https ? "yes" : "no") + " " + proxy + " " + appType);
+                + user + " " + domain + " " + adminUser + " " + (https ? "yes" : "no")
+                + " " + proxy + " " + appType + " " + (blueGreen ? "yes" : "no"));
 
         Files.delete(tempScript);
         System.out.println("Server initialized successfully.\n");
@@ -305,6 +447,11 @@ public class Deploy {
         } else {
             System.err.println("No Maven or Gradle project found in current directory");
             System.exit(1);
+        }
+
+        if (blueGreen) {
+            deployBlueGreen(quarkus, mavenw, pom);
+            return;
         }
 
         // 2. Prepare and sync to server
@@ -353,11 +500,72 @@ public class Deploy {
     }
 
     // -----------------------------------------------------------------------
+    // deployBlueGreen – zero-downtime blue/green deploy
+    // -----------------------------------------------------------------------
+    static void deployBlueGreen(boolean quarkus, boolean mavenw, boolean pom) throws Exception {
+        // Read the current active slot to determine where to rsync
+        System.out.println("Reading active slot ...");
+        String activeRaw = sshOutputAsRoot("cat /home/" + user + "/active 2>/dev/null || echo blue").trim();
+        String active = activeRaw.isBlank() ? "blue" : activeRaw;
+        String inactive = "blue".equals(active) ? "green" : "blue";
+        System.out.println("Active slot: " + active + ", deploying to: " + inactive);
+
+        // Sync build artifacts to the inactive slot directory
+        System.out.println("Syncing to server (slot: " + inactive + ") ...");
+        String remoteDir = user + "@" + host + ":/home/" + user + "/app-" + inactive + "/";
+
+        if (quarkus) {
+            run("rsync", "-az", "--delete", "--stats",
+                    "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
+                    "target/quarkus-app",
+                    remoteDir);
+        } else {
+            Path jarDir = (mavenw || pom) ? Path.of("target") : Path.of("build", "libs");
+            Path jar = findJar(jarDir);
+            System.out.println("Found jar: " + jar);
+
+            Path extracted = Path.of("target", "extracted");
+            if (Files.exists(extracted)) {
+                deleteRecursively(extracted);
+            }
+            run("java", "-Djarmode=tools", "-jar", jar.toString(),
+                    "extract", "--destination", extracted.toString());
+
+            Path extractRoot = findExtractedRoot(extracted);
+            Path extractedJar = findJar(extractRoot);
+            Path renamedJar = extractRoot.resolve(user + ".jar");
+            if (!extractedJar.getFileName().toString().equals(user + ".jar")) {
+                Files.move(extractedJar, renamedJar, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            run("rsync", "-az", "--delete", "--stats",
+                    "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
+                    extractRoot + "/",
+                    remoteDir);
+        }
+
+        // Upload and run the swap script on the server
+        System.out.println("Running blue-green swap ...");
+        Path tempScript = Files.createTempFile("bg-swap", ".sh");
+        Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
+        scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
+        Files.delete(tempScript);
+        sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain);
+
+        System.out.println("Deployed successfully! Active slot is now: " + inactive);
+    }
+
+    // -----------------------------------------------------------------------
     // logs – tail journalctl
     // -----------------------------------------------------------------------
     static void logs(String[] args) throws Exception {
         String lines = args.length > 1 ? args[1] : "200";
-        String cmd = "journalctl -u " + user + " -n " + lines + " -f";
+        String unitName = user;
+        if (blueGreen) {
+            String active = sshOutputAsRoot("cat /home/" + user + "/active 2>/dev/null || echo blue").trim();
+            unitName = user + "-" + (active.isBlank() ? "blue" : active);
+        }
+        String cmd = "journalctl -u " + unitName + " -n " + lines + " -f";
         if (!"root".equals(adminUser)) {
             cmd = "sudo " + cmd;
         }
@@ -423,11 +631,21 @@ public class Deploy {
             #!/bin/bash
             APP_USER="$1"
             PROXY="$2"
+            BLUE_GREEN="${3:-no}"
 
-            echo "--- Stopping and removing service ---"
-            systemctl stop "$APP_USER" 2>/dev/null || true
-            systemctl disable "$APP_USER" 2>/dev/null || true
-            rm -f "/etc/systemd/system/$APP_USER.service"
+            echo "--- Stopping and removing service(s) ---"
+            if [ "$BLUE_GREEN" = "yes" ]; then
+                systemctl stop "$APP_USER-blue" 2>/dev/null || true
+                systemctl stop "$APP_USER-green" 2>/dev/null || true
+                systemctl disable "$APP_USER-blue" 2>/dev/null || true
+                systemctl disable "$APP_USER-green" 2>/dev/null || true
+                rm -f "/etc/systemd/system/$APP_USER-blue.service"
+                rm -f "/etc/systemd/system/$APP_USER-green.service"
+            else
+                systemctl stop "$APP_USER" 2>/dev/null || true
+                systemctl disable "$APP_USER" 2>/dev/null || true
+                rm -f "/etc/systemd/system/$APP_USER.service"
+            fi
             systemctl daemon-reload
 
             if [ "$PROXY" = "caddy" ] && [ -f /etc/caddy/Caddyfile ]; then
@@ -450,7 +668,7 @@ public class Deploy {
 
         scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/clean-server.sh");
         sshAsRoot("chmod +x /tmp/clean-server.sh");
-        sshAsRoot("/tmp/clean-server.sh " + user + " " + proxy);
+        sshAsRoot("/tmp/clean-server.sh " + user + " " + proxy + " " + (blueGreen ? "yes" : "no"));
 
         Files.delete(tempScript);
 
@@ -522,6 +740,23 @@ public class Deploy {
             command = "sudo " + command;
         }
         ssh(adminUser, command);
+    }
+
+    static String sshOutputAsRoot(String command) throws Exception {
+        if (!"root".equals(adminUser)) {
+            command = "sudo " + command;
+        }
+        var pb = new ProcessBuilder("ssh", "-i", sshKey, "-o", "StrictHostKeyChecking=accept-new",
+                adminUser + "@" + host, command);
+        pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+        var process = pb.start();
+        String output = new String(process.getInputStream().readAllBytes());
+        int exit = process.waitFor();
+        if (exit != 0) {
+            System.err.println("Remote command failed (exit " + exit + ")");
+            System.exit(exit);
+        }
+        return output;
     }
 
     static void scp(String local, String remote) throws Exception {
