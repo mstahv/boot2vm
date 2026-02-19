@@ -8,7 +8,8 @@ import java.util.*;
 
 public class Deploy {
 
-    static String host, user, domain, sshKey, adminUser;
+    static String host, user, domain, sshKey, adminUser, proxy;
+    static boolean https;
 
     static final String SETUP_SCRIPT = """
             #!/bin/bash
@@ -16,6 +17,8 @@ public class Deploy {
             APP_USER="$1"
             DOMAIN="$2"
             ADMIN_USER="${3:-root}"
+            HTTPS="${4:-yes}"
+            PROXY="${5:-caddy}"
             echo "=== Setting up server for user '$APP_USER' with domain '$DOMAIN' ==="
 
             # 1. Automatic security updates with nightly reboot if required
@@ -80,37 +83,47 @@ public class Deploy {
             systemctl daemon-reload
             systemctl enable "$APP_USER"
 
-            # 6. Install Caddy as reverse proxy with automatic HTTPS
-            echo "--- Installing Caddy ---"
-            apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \\
-                | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \\
-                > /etc/apt/sources.list.d/caddy-stable.list
-            apt-get update
-            apt-get install -y caddy
-            cat > /etc/caddy/Caddyfile << CADDY
+            # 6. Install reverse proxy (if configured)
+            if [ "$PROXY" = "caddy" ]; then
+                echo "--- Installing Caddy ---"
+                apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \\
+                    | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \\
+                    > /etc/apt/sources.list.d/caddy-stable.list
+                apt-get update
+                apt-get install -y caddy
+                if [ "$HTTPS" = "yes" ]; then
+                    cat > /etc/caddy/Caddyfile << CADDY
             $DOMAIN {
                 reverse_proxy localhost:8080
             }
             CADDY
-            systemctl reload caddy
+                else
+                    cat > /etc/caddy/Caddyfile << CADDY
+            http://$DOMAIN {
+                reverse_proxy localhost:8080
+            }
+            CADDY
+                fi
+                systemctl reload caddy
+            else
+                echo "--- Skipping reverse proxy installation ---"
+            fi
 
             echo "=== Server setup complete! ==="
             """;
 
     public static void main(String[] args) throws Exception {
-        if (args.length == 0) {
-            printUsage();
-            System.exit(1);
-        }
+        String command = args.length == 0 ? "deploy" : args[0];
 
-        switch (args[0]) {
+        switch (command) {
             case "init" -> init();
             case "deploy" -> { loadConfig(); deploy(); }
-            case "logs" -> { loadConfig(); logs(); }
+            case "logs" -> { loadConfig(); logs(args); }
+            case "add-key" -> { loadConfig(); addKey(args); }
             default -> {
-                System.err.println("Unknown command: " + args[0]);
+                System.err.println("Unknown command: " + command);
                 printUsage();
                 System.exit(1);
             }
@@ -121,9 +134,10 @@ public class Deploy {
         System.out.println("Usage: jbang Deploy.java <command>");
         System.out.println();
         System.out.println("Commands:");
-        System.out.println("  init    - Set up the server (run once)");
-        System.out.println("  deploy  - Build, sync, and restart the app");
-        System.out.println("  logs    - Tail the application logs");
+        System.out.println("  init           - Set up the server (run once)");
+        System.out.println("  deploy         - Build, sync, and restart the app");
+        System.out.println("  logs [n]       - Tail the application logs (default: 200 lines)");
+        System.out.println("  add-key [file] - Add an SSH public key to the server");
     }
 
     static void loadConfig() throws IOException {
@@ -141,6 +155,8 @@ public class Deploy {
         domain = props.getProperty("DOMAIN", host);
         sshKey = props.getProperty("SSH_KEY", "~/.ssh/id_rsa.pub");
         adminUser = props.getProperty("ADMIN_USER", "root");
+        https = !"no".equalsIgnoreCase(props.getProperty("HTTPS", "yes"));
+        proxy = props.getProperty("PROXY", "caddy");
 
         if (sshKey.endsWith(".pub")) {
             sshKey = sshKey.substring(0, sshKey.length() - 4);
@@ -168,7 +184,7 @@ public class Deploy {
         // Load existing config as defaults if available
         Path configPath = Path.of("vmhosting.conf");
         String defaultHost = null, defaultUser = null, defaultDomain = null,
-                defaultKey = null, defaultAdmin = null;
+                defaultKey = null, defaultAdmin = null, defaultHttps = null, defaultProxy = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -179,6 +195,8 @@ public class Deploy {
             defaultDomain = props.getProperty("DOMAIN");
             defaultKey = props.getProperty("SSH_KEY");
             defaultAdmin = props.getProperty("ADMIN_USER");
+            defaultHttps = props.getProperty("HTTPS");
+            defaultProxy = props.getProperty("PROXY");
         }
 
         // HOST (required)
@@ -198,6 +216,11 @@ public class Deploy {
                 defaultKey != null ? defaultKey : "~/.ssh/id_rsa.pub");
         adminUser = prompt(console, "Admin SSH user",
                 defaultAdmin != null ? defaultAdmin : "root");
+        String httpsStr = prompt(console, "HTTPS",
+                defaultHttps != null ? defaultHttps : "yes");
+        https = httpsStr.equalsIgnoreCase("yes");
+        proxy = prompt(console, "Reverse proxy (caddy/none)",
+                defaultProxy != null ? defaultProxy : "caddy");
 
         // Write vmhosting.conf
         Files.writeString(configPath,
@@ -205,7 +228,9 @@ public class Deploy {
                 + "USER=" + user + "\n"
                 + "DOMAIN=" + domain + "\n"
                 + "SSH_KEY=" + sshKeyRaw + "\n"
-                + "ADMIN_USER=" + adminUser + "\n");
+                + "ADMIN_USER=" + adminUser + "\n"
+                + "HTTPS=" + (https ? "yes" : "no") + "\n"
+                + "PROXY=" + proxy + "\n");
         System.out.println("Wrote vmhosting.conf");
 
         // Resolve the private key path for SSH connections (strip .pub if present)
@@ -224,8 +249,9 @@ public class Deploy {
         Files.writeString(tempScript, SETUP_SCRIPT);
 
         scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/setup-server.sh");
-        sshAsRoot("chmod +x /tmp/setup-server.sh && /tmp/setup-server.sh "
-                + user + " " + domain + " " + adminUser);
+        sshAsRoot("chmod +x /tmp/setup-server.sh");
+        sshAsRoot("/tmp/setup-server.sh "
+                + user + " " + domain + " " + adminUser + " " + (https ? "yes" : "no") + " " + proxy);
 
         Files.delete(tempScript);
         System.out.println("Server initialized successfully.\n");
@@ -307,8 +333,9 @@ public class Deploy {
     // -----------------------------------------------------------------------
     // logs – tail journalctl
     // -----------------------------------------------------------------------
-    static void logs() throws Exception {
-        String cmd = "journalctl -u " + user + " -f";
+    static void logs(String[] args) throws Exception {
+        String lines = args.length > 1 ? args[1] : "200";
+        String cmd = "journalctl -u " + user + " -n " + lines + " -f";
         if (!"root".equals(adminUser)) {
             cmd = "sudo " + cmd;
         }
@@ -319,6 +346,52 @@ public class Deploy {
                 .inheritIO()
                 .start()
                 .waitFor();
+    }
+
+    // -----------------------------------------------------------------------
+    // add-key – register an additional SSH public key for the app user
+    // -----------------------------------------------------------------------
+    static void addKey(String[] args) throws Exception {
+        String pubKey;
+        if (args.length > 1) {
+            pubKey = readPublicKey(args[1]);
+        } else {
+            var console = System.console();
+            if (console == null) {
+                System.err.println("No console available. Pass the key file as argument.");
+                System.exit(1);
+            }
+            String input = console.readLine("Paste the public key: ").trim();
+            pubKey = looksLikeKeyContent(input) ? input : readPublicKey(input);
+        }
+        if (!looksLikeKeyContent(pubKey)) {
+            System.err.println("Does not look like a valid SSH public key");
+            System.exit(1);
+        }
+
+        System.out.println("Adding key to " + user + "@" + host + " ...");
+        String escaped = pubKey.replace("\"", "\\\"");
+        sshAsRoot("grep -qF \"" + escaped + "\" /home/" + user + "/.ssh/authorized_keys 2>/dev/null"
+                + " && echo 'Key already present' "
+                + " || (echo \"" + escaped + "\" >> /home/" + user + "/.ssh/authorized_keys"
+                + " && echo 'Key added successfully')");
+    }
+
+    static String readPublicKey(String path) throws IOException {
+        if (path.startsWith("~")) {
+            path = System.getProperty("user.home") + path.substring(1);
+        }
+        Path keyFile = Path.of(path);
+        if (!Files.exists(keyFile)) {
+            System.err.println("File not found: " + path);
+            System.exit(1);
+        }
+        return Files.readString(keyFile).trim();
+    }
+
+    static boolean looksLikeKeyContent(String s) {
+        return s.startsWith("ssh-rsa ") || s.startsWith("ssh-ed25519 ")
+                || s.startsWith("ecdsa-sha2-") || s.startsWith("sk-ssh-");
     }
 
     // -----------------------------------------------------------------------
