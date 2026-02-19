@@ -10,6 +10,9 @@ public class Deploy {
 
     static String host, user, domain, sshKey, adminUser, proxy, appType;
     static boolean https, blueGreen;
+    static boolean gracefulDrain;
+    static String slotCookie = "X-Server-Slot", managementPort = "", notifyPath = "/actuator/new-version", activeUsersPath = "/actuator/active-users";
+    static int drainTimeout = 300;
 
     static final String SETUP_SCRIPT = """
             #!/bin/bash
@@ -21,6 +24,9 @@ public class Deploy {
             PROXY="${5:-caddy}"
             APP_TYPE="${6:-spring-boot}"
             BLUE_GREEN="${7:-no}"
+            MANAGEMENT_PORT_BLUE="${8:-0}"
+            FIREWALL="${9:-yes}"
+            EXPOSE_NODES="${10:-no}"
             echo "=== Setting up server for user '$APP_USER' with domain '$DOMAIN' ==="
 
             # Wait for any background apt/dpkg process to release the lock
@@ -83,6 +89,15 @@ public class Deploy {
             if [ "$BLUE_GREEN" = "yes" ]; then
                 for SLOT in blue green; do
                     if [ "$SLOT" = "blue" ]; then SLOT_PORT=8080; else SLOT_PORT=8081; fi
+                    if [ "$MANAGEMENT_PORT_BLUE" != "0" ]; then
+                        if [ "$SLOT" = "blue" ]; then
+                            MGMT_ENV_LINE="Environment=MANAGEMENT_SERVER_PORT=$MANAGEMENT_PORT_BLUE"
+                        else
+                            MGMT_ENV_LINE="Environment=MANAGEMENT_SERVER_PORT=$((MANAGEMENT_PORT_BLUE + 1))"
+                        fi
+                    else
+                        MGMT_ENV_LINE=""
+                    fi
                     if [ "$APP_TYPE" = "quarkus" ]; then
                         EXEC_START="/usr/bin/java -jar /home/$APP_USER/app-$SLOT/quarkus-app/quarkus-run.jar"
                     else
@@ -99,6 +114,8 @@ public class Deploy {
             WorkingDirectory=/home/$APP_USER/app-$SLOT
             Environment=SERVER_PORT=$SLOT_PORT
             Environment=QUARKUS_HTTP_PORT=$SLOT_PORT
+            Environment=APP_SLOT=$SLOT
+            $MGMT_ENV_LINE
             ExecStart=$EXEC_START
             Restart=on-failure
             RestartSec=10
@@ -163,6 +180,30 @@ public class Deploy {
                 echo "--- Skipping reverse proxy installation ---"
             fi
 
+            # 7. Configure firewall
+            if [ "$FIREWALL" = "yes" ]; then
+                echo "--- Configuring firewall (ufw) ---"
+                apt-get install -y ufw
+                ufw --force reset
+                ufw default deny incoming
+                ufw default allow outgoing
+                ufw allow ssh
+                ufw allow 80/tcp
+                ufw allow 443/tcp
+                if [ "$EXPOSE_NODES" = "yes" ]; then
+                    ufw allow 8080/tcp
+                    ufw allow 8081/tcp
+                fi
+                ufw --force enable
+                if [ "$EXPOSE_NODES" = "yes" ]; then
+                    echo "Firewall enabled: SSH, 80/tcp, 443/tcp, 8080/tcp, 8081/tcp allowed inbound"
+                else
+                    echo "Firewall enabled: SSH, 80/tcp, 443/tcp allowed inbound; all else blocked"
+                fi
+            else
+                echo "--- Skipping firewall configuration ---"
+            fi
+
             echo "=== Server setup complete! ==="
             """;
 
@@ -173,6 +214,7 @@ public class Deploy {
             PROXY="${2:-caddy}"
             HTTPS="${3:-yes}"
             DOMAIN="$4"
+            MANAGEMENT_PORT_BLUE="${5:-0}"
 
             LOCK_DIR="/home/$APP_USER/deploy.lock"
             ACTIVE_FILE="/home/$APP_USER/active"
@@ -188,13 +230,30 @@ public class Deploy {
             ACTIVE=$(cat "$ACTIVE_FILE" 2>/dev/null || echo blue)
             if [ "$ACTIVE" = "blue" ]; then
                 INACTIVE="green"
+                ACTIVE_PORT=8080
                 INACTIVE_PORT=8081
             else
                 INACTIVE="blue"
+                ACTIVE_PORT=8081
                 INACTIVE_PORT=8080
             fi
 
-            echo "Active slot: $ACTIVE, deploying to: $INACTIVE (port $INACTIVE_PORT)"
+            # Resolve management port for the new (inactive) slot
+            if [ "$MANAGEMENT_PORT_BLUE" != "0" ]; then
+                if [ "$INACTIVE" = "blue" ]; then
+                    INACTIVE_MGMT_PORT=$MANAGEMENT_PORT_BLUE
+                else
+                    INACTIVE_MGMT_PORT=$((MANAGEMENT_PORT_BLUE + 1))
+                fi
+                HEALTH_URL="http://localhost:$INACTIVE_MGMT_PORT/actuator/health"
+            else
+                HEALTH_URL="http://localhost:$INACTIVE_PORT/"
+            fi
+
+            ACTIVE_LABEL="$ACTIVE(:$ACTIVE_PORT)"
+            INACTIVE_LABEL="$INACTIVE(:$INACTIVE_PORT)"
+
+            echo "Active slot: $ACTIVE_LABEL, deploying to: $INACTIVE_LABEL"
 
             INACTIVE_SERVICE="$APP_USER-$INACTIVE"
             ACTIVE_SERVICE="$APP_USER-$ACTIVE"
@@ -203,14 +262,14 @@ public class Deploy {
             systemctl stop "$INACTIVE_SERVICE" 2>/dev/null || true
 
             # Start the new version
-            echo "--- Starting $INACTIVE_SERVICE ---"
+            echo "--- Starting $INACTIVE_LABEL ($INACTIVE_SERVICE) ---"
             systemctl start "$INACTIVE_SERVICE"
 
-            # Health check: wait up to 60 seconds for any HTTP response on the new port
-            echo "--- Health check on port $INACTIVE_PORT (up to 60s) ---"
+            # Health check: wait up to 60 seconds for the new slot to become ready
+            echo "--- Health check $INACTIVE_LABEL ($HEALTH_URL, up to 60s) ---"
             HEALTHY=0
             for i in $(seq 1 30); do
-                if curl -s --max-time 3 -o /dev/null "http://localhost:$INACTIVE_PORT/" 2>/dev/null; then
+                if curl -s --max-time 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then
                     HEALTHY=1
                     echo "App responded after $((i * 2))s"
                     break
@@ -226,7 +285,7 @@ public class Deploy {
 
             # Swap traffic at the reverse proxy
             if [ "$PROXY" = "caddy" ]; then
-                echo "--- Swapping Caddy to port $INACTIVE_PORT ---"
+                echo "--- Swapping Caddy to $INACTIVE_LABEL ---"
                 if [ "$HTTPS" = "yes" ]; then
                     cat > /etc/caddy/Caddyfile << CADDY
             $DOMAIN {
@@ -244,7 +303,7 @@ public class Deploy {
             fi
 
             # Stop old service, enable new active slot for boot, disable old
-            echo "--- Stopping $ACTIVE_SERVICE ---"
+            echo "--- Stopping $ACTIVE_LABEL ($ACTIVE_SERVICE) ---"
             systemctl stop "$ACTIVE_SERVICE" || true
             systemctl enable "$INACTIVE_SERVICE"
             systemctl disable "$ACTIVE_SERVICE" || true
@@ -252,7 +311,193 @@ public class Deploy {
             # Write new active marker
             echo "$INACTIVE" > "$ACTIVE_FILE"
 
-            echo "=== Blue-green deploy complete! Active slot: $INACTIVE (port $INACTIVE_PORT) ==="
+            echo "=== Blue-green deploy complete! Active slot: $INACTIVE_LABEL ==="
+            """;
+
+    static final String BLUE_GREEN_GRACEFUL_SCRIPT = """
+            #!/bin/bash
+            set -euo pipefail
+            APP_USER="$1"
+            PROXY="${2:-caddy}"
+            HTTPS="${3:-yes}"
+            DOMAIN="$4"
+            SLOT_COOKIE="${5:-X-Server-Slot}"
+            DRAIN_TIMEOUT="${6:-300}"
+            NOTIFY_PATH="${7:-/actuator/new-version}"
+            ACTIVE_USERS_PATH="${8:-/actuator/active-users}"
+            MANAGEMENT_PORT_BLUE="${9:-0}"
+
+            LOCK_DIR="/home/$APP_USER/deploy.lock"
+            ACTIVE_FILE="/home/$APP_USER/active"
+
+            # Acquire lock atomically — mkdir is atomic on local filesystems
+            if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+                echo "ERROR: Another deploy is in progress. Remove $LOCK_DIR to force-unlock." >&2
+                exit 1
+            fi
+            trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+            # Read current active slot (default to blue if file missing)
+            ACTIVE=$(cat "$ACTIVE_FILE" 2>/dev/null || echo blue)
+            if [ "$ACTIVE" = "blue" ]; then
+                INACTIVE="green"
+                INACTIVE_PORT=8081
+                ACTIVE_PORT=8080
+            else
+                INACTIVE="blue"
+                INACTIVE_PORT=8080
+                ACTIVE_PORT=8081
+            fi
+
+            # Resolve management ports (Spring Boot management.server.port) for each slot
+            if [ "$MANAGEMENT_PORT_BLUE" != "0" ]; then
+                if [ "$INACTIVE" = "blue" ]; then
+                    INACTIVE_MGMT_PORT=$MANAGEMENT_PORT_BLUE
+                    ACTIVE_MGMT_PORT=$((MANAGEMENT_PORT_BLUE + 1))
+                else
+                    INACTIVE_MGMT_PORT=$((MANAGEMENT_PORT_BLUE + 1))
+                    ACTIVE_MGMT_PORT=$MANAGEMENT_PORT_BLUE
+                fi
+                HEALTH_URL="http://localhost:$INACTIVE_MGMT_PORT/actuator/health"
+            else
+                INACTIVE_MGMT_PORT=$INACTIVE_PORT
+                ACTIVE_MGMT_PORT=$ACTIVE_PORT
+                HEALTH_URL="http://localhost:$INACTIVE_PORT/"
+            fi
+
+            ACTIVE_LABEL="$ACTIVE(:$ACTIVE_PORT)"
+            INACTIVE_LABEL="$INACTIVE(:$INACTIVE_PORT)"
+
+            echo "Active slot: $ACTIVE_LABEL, deploying to: $INACTIVE_LABEL"
+
+            INACTIVE_SERVICE="$APP_USER-$INACTIVE"
+            ACTIVE_SERVICE="$APP_USER-$ACTIVE"
+
+            # Stop inactive service in case it is lingering from a failed previous deploy
+            systemctl stop "$INACTIVE_SERVICE" 2>/dev/null || true
+
+            # Start the new version
+            echo "--- Starting $INACTIVE_LABEL ($INACTIVE_SERVICE) ---"
+            systemctl start "$INACTIVE_SERVICE"
+
+            # Health check: wait up to 60 seconds for the new slot to become ready
+            echo "--- Health check $INACTIVE_LABEL ($HEALTH_URL, up to 60s) ---"
+            HEALTHY=0
+            for i in $(seq 1 30); do
+                if curl -s --max-time 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then
+                    HEALTHY=1
+                    echo "App responded after $((i * 2))s"
+                    break
+                fi
+                sleep 2
+            done
+
+            if [ "$HEALTHY" = "0" ]; then
+                echo "ERROR: Health check failed after 60s — rolling back" >&2
+                systemctl stop "$INACTIVE_SERVICE" || true
+                exit 1
+            fi
+
+            # Write split-traffic Caddyfile (cookie-pinned users stay on old slot)
+            if [ "$PROXY" = "caddy" ]; then
+                echo "--- Writing drain-mode Caddyfile (old=$ACTIVE_LABEL new=$INACTIVE_LABEL, cookie $SLOT_COOKIE=$ACTIVE) ---"
+                if [ "$HTTPS" = "yes" ]; then
+                    cat > /etc/caddy/Caddyfile << CADDY
+            $DOMAIN {
+                @old_slot {
+                    header Cookie *$SLOT_COOKIE=$ACTIVE*
+                }
+                route @old_slot {
+                    reverse_proxy localhost:$ACTIVE_PORT
+                }
+                reverse_proxy localhost:$INACTIVE_PORT
+            }
+            CADDY
+                else
+                    cat > /etc/caddy/Caddyfile << CADDY
+            http://$DOMAIN {
+                @old_slot {
+                    header Cookie *$SLOT_COOKIE=$ACTIVE*
+                }
+                route @old_slot {
+                    reverse_proxy localhost:$ACTIVE_PORT
+                }
+                reverse_proxy localhost:$INACTIVE_PORT
+            }
+            CADDY
+                fi
+                systemctl reload caddy
+            fi
+
+            # Notify old server that a new version is available
+            DEADLINE=$(date -u --date="+${DRAIN_TIMEOUT} seconds" +%Y-%m-%dT%H:%M:%SZ)
+            echo "--- Notifying old server (POST http://localhost:$ACTIVE_MGMT_PORT$NOTIFY_PATH, deadline: $DEADLINE) ---"
+            if ! curl -s --max-time 5 -X POST \\
+                    -H "Content-Type: application/json" \\
+                    -d "{\\\"deadline\\\":\\\"$DEADLINE\\\"}" \\
+                    "http://localhost:$ACTIVE_MGMT_PORT$NOTIFY_PATH" 2>/dev/null; then
+                echo "WARNING: Notify POST failed (non-fatal)"
+            fi
+
+            # Poll active-users endpoint until drained or timeout expires
+            echo "--- Draining users from $ACTIVE_LABEL ($ACTIVE_SERVICE) (timeout: ${DRAIN_TIMEOUT}s) ---"
+            ELAPSED=0
+            COUNT="1"
+            while [ "$ELAPSED" -lt "$DRAIN_TIMEOUT" ]; do
+                RESPONSE=$(curl -s --max-time 5 "http://localhost:$ACTIVE_MGMT_PORT$ACTIVE_USERS_PATH" 2>/dev/null || echo "")
+                COUNT=$(echo "$RESPONSE" | grep -oP '"count"\\s*:\\s*\\K[0-9]+' 2>/dev/null || echo "")
+                if [ -z "$COUNT" ]; then
+                    echo "INFO: active-users endpoint unreachable or returned no count — assuming drained"
+                    COUNT="0"
+                fi
+                if [ "$COUNT" = "0" ]; then
+                    echo "All users drained after ${ELAPSED}s"
+                    break
+                fi
+                REMAINING=$((DRAIN_TIMEOUT - ELAPSED))
+                echo "$COUNT users remaining (${ELAPSED}s elapsed, ${REMAINING}s until forced upgrade) — press D to force-upgrade now"
+                key=""
+                read -t 10 -r -s -n 1 key 2>/dev/null || true
+                if [ "${key}" = "d" ] || [ "${key}" = "D" ]; then
+                    echo "Operator requested force-cutover — remaining users will be dropped to new slot"
+                    break
+                fi
+                ELAPSED=$((ELAPSED + 10))
+            done
+
+            if [ "$COUNT" != "0" ]; then
+                echo "Forcing cutover after ${DRAIN_TIMEOUT}s"
+            fi
+
+            # Switch Caddy to serve only the new backend
+            if [ "$PROXY" = "caddy" ]; then
+                echo "--- Switching Caddy to $INACTIVE_LABEL only ---"
+                if [ "$HTTPS" = "yes" ]; then
+                    cat > /etc/caddy/Caddyfile << CADDY
+            $DOMAIN {
+                reverse_proxy localhost:$INACTIVE_PORT
+            }
+            CADDY
+                else
+                    cat > /etc/caddy/Caddyfile << CADDY
+            http://$DOMAIN {
+                reverse_proxy localhost:$INACTIVE_PORT
+            }
+            CADDY
+                fi
+                systemctl reload caddy
+            fi
+
+            # Stop old service, enable new active slot for boot, disable old
+            echo "--- Stopping $ACTIVE_LABEL ($ACTIVE_SERVICE) ---"
+            systemctl stop "$ACTIVE_SERVICE" || true
+            systemctl enable "$INACTIVE_SERVICE"
+            systemctl disable "$ACTIVE_SERVICE" || true
+
+            # Write new active marker
+            echo "$INACTIVE" > "$ACTIVE_FILE"
+
+            echo "=== Graceful blue-green deploy complete! Active slot: $INACTIVE_LABEL ==="
             """;
 
     public static void main(String[] args) throws Exception {
@@ -302,6 +547,12 @@ public class Deploy {
         proxy = props.getProperty("PROXY", "caddy");
         appType = props.getProperty("APP_TYPE", "spring-boot");
         blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
+        gracefulDrain = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN_GRACEFUL", "no"));
+        slotCookie = props.getProperty("SLOT_COOKIE", "X-Server-Slot");
+        drainTimeout = Integer.parseInt(props.getProperty("DRAIN_TIMEOUT", "300"));
+        managementPort = props.getProperty("MANAGEMENT_PORT", "");
+        notifyPath = props.getProperty("NOTIFY_PATH", "/actuator/new-version");
+        activeUsersPath = props.getProperty("ACTIVE_USERS_PATH", "/actuator/active-users");
 
         if (sshKey.endsWith(".pub")) {
             sshKey = sshKey.substring(0, sshKey.length() - 4);
@@ -330,7 +581,10 @@ public class Deploy {
         Path configPath = Path.of("vmhosting.conf");
         String defaultHost = null, defaultUser = null, defaultDomain = null,
                 defaultKey = null, defaultAdmin = null, defaultHttps = null,
-                defaultProxy = null, defaultAppType = null, defaultBlueGreen = null;
+                defaultProxy = null, defaultAppType = null, defaultBlueGreen = null,
+                defaultGracefulDrain = null, defaultSlotCookie = null, defaultDrainTimeout = null,
+                defaultManagementPort = null, defaultNotifyPath = null, defaultActiveUsersPath = null,
+                defaultFirewall = null, defaultExposeNodes = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -345,6 +599,14 @@ public class Deploy {
             defaultProxy = props.getProperty("PROXY");
             defaultAppType = props.getProperty("APP_TYPE");
             defaultBlueGreen = props.getProperty("BLUE_GREEN");
+            defaultGracefulDrain = props.getProperty("BLUE_GREEN_GRACEFUL");
+            defaultSlotCookie = props.getProperty("SLOT_COOKIE");
+            defaultDrainTimeout = props.getProperty("DRAIN_TIMEOUT");
+            defaultManagementPort = props.getProperty("MANAGEMENT_PORT");
+            defaultNotifyPath = props.getProperty("NOTIFY_PATH");
+            defaultActiveUsersPath = props.getProperty("ACTIVE_USERS_PATH");
+            defaultFirewall = props.getProperty("FIREWALL");
+            defaultExposeNodes = props.getProperty("EXPOSE_NODES");
         }
 
         // HOST (required)
@@ -375,6 +637,35 @@ public class Deploy {
                 defaultBlueGreen != null ? defaultBlueGreen : "no");
         blueGreen = "yes".equalsIgnoreCase(blueGreenStr);
 
+        if (blueGreen) {
+            String gracefulDrainStr = prompt(console, "Graceful drain mode (yes/no)",
+                    defaultGracefulDrain != null ? defaultGracefulDrain : "no");
+            gracefulDrain = "yes".equalsIgnoreCase(gracefulDrainStr);
+            if (gracefulDrain) {
+                slotCookie = prompt(console, "Slot cookie name",
+                        defaultSlotCookie != null ? defaultSlotCookie : "X-Server-Slot");
+                String drainTimeoutStr = prompt(console, "Drain timeout (seconds)",
+                        defaultDrainTimeout != null ? defaultDrainTimeout : "300");
+                drainTimeout = Integer.parseInt(drainTimeoutStr);
+                managementPort = prompt(console, "Management port (blank = app port)",
+                        defaultManagementPort != null ? defaultManagementPort : "8090");
+                notifyPath = prompt(console, "Notify path",
+                        defaultNotifyPath != null ? defaultNotifyPath : "/actuator/new-version");
+                activeUsersPath = prompt(console, "Active users path",
+                        defaultActiveUsersPath != null ? defaultActiveUsersPath : "/actuator/active-users");
+            }
+        }
+
+        String firewallStr = prompt(console, "Configure firewall with ufw (yes/no)",
+                defaultFirewall != null ? defaultFirewall : "yes");
+        boolean firewall = "yes".equalsIgnoreCase(firewallStr);
+        boolean exposeNodes = false;
+        if (firewall) {
+            String exposeNodesStr = prompt(console, "Expose app server ports 8080/8081 for direct access (yes/no)",
+                    defaultExposeNodes != null ? defaultExposeNodes : "no");
+            exposeNodes = "yes".equalsIgnoreCase(exposeNodesStr);
+        }
+
         // Write vmhosting.conf
         Files.writeString(configPath,
                 "HOST=" + host + "\n"
@@ -385,7 +676,15 @@ public class Deploy {
                 + "HTTPS=" + (https ? "yes" : "no") + "\n"
                 + "PROXY=" + proxy + "\n"
                 + "APP_TYPE=" + appType + "\n"
-                + "BLUE_GREEN=" + (blueGreen ? "yes" : "no") + "\n");
+                + "BLUE_GREEN=" + (blueGreen ? "yes" : "no") + "\n"
+                + "BLUE_GREEN_GRACEFUL=" + (gracefulDrain ? "yes" : "no") + "\n"
+                + "SLOT_COOKIE=" + slotCookie + "\n"
+                + "DRAIN_TIMEOUT=" + drainTimeout + "\n"
+                + "MANAGEMENT_PORT=" + managementPort + "\n"
+                + "NOTIFY_PATH=" + notifyPath + "\n"
+                + "ACTIVE_USERS_PATH=" + activeUsersPath + "\n"
+                + "FIREWALL=" + (firewall ? "yes" : "no") + "\n"
+                + "EXPOSE_NODES=" + (exposeNodes ? "yes" : "no") + "\n");
         System.out.println("Wrote vmhosting.conf");
 
         // Resolve the private key path for SSH connections (strip .pub if present)
@@ -407,7 +706,10 @@ public class Deploy {
         sshAsRoot("chmod +x /tmp/setup-server.sh");
         sshAsRoot("/tmp/setup-server.sh "
                 + user + " " + domain + " " + adminUser + " " + (https ? "yes" : "no")
-                + " " + proxy + " " + appType + " " + (blueGreen ? "yes" : "no"));
+                + " " + proxy + " " + appType + " " + (blueGreen ? "yes" : "no")
+                + " " + (managementPort != null && !managementPort.isBlank() ? managementPort : "0")
+                + " " + (firewall ? "yes" : "no")
+                + " " + (exposeNodes ? "yes" : "no"));
 
         Files.delete(tempScript);
         System.out.println("Server initialized successfully.\n");
@@ -510,6 +812,8 @@ public class Deploy {
         String inactive = "blue".equals(active) ? "green" : "blue";
         System.out.println("Active slot: " + active + ", deploying to: " + inactive);
 
+        String mgmtPortBlue = (managementPort != null && !managementPort.isBlank()) ? managementPort : "0";
+
         // Sync build artifacts to the inactive slot directory
         System.out.println("Syncing to server (slot: " + inactive + ") ...");
         String remoteDir = user + "@" + host + ":/home/" + user + "/app-" + inactive + "/";
@@ -544,13 +848,25 @@ public class Deploy {
                     remoteDir);
         }
 
-        // Upload and run the swap script on the server
-        System.out.println("Running blue-green swap ...");
-        Path tempScript = Files.createTempFile("bg-swap", ".sh");
-        Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
-        scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
-        Files.delete(tempScript);
-        sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain);
+        // Upload and run the swap (or graceful drain) script on the server
+        if (gracefulDrain) {
+            System.out.println("Running graceful blue-green drain ...");
+            Path tempScript = Files.createTempFile("bg-graceful", ".sh");
+            Files.writeString(tempScript, BLUE_GREEN_GRACEFUL_SCRIPT);
+            scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-graceful.sh");
+            Files.delete(tempScript);
+            sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+                    + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
+                    + " " + mgmtPortBlue);
+        } else {
+            System.out.println("Running blue-green swap ...");
+            Path tempScript = Files.createTempFile("bg-swap", ".sh");
+            Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
+            scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
+            Files.delete(tempScript);
+            sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+                    + " " + mgmtPortBlue);
+        }
 
         System.out.println("Deployed successfully! Active slot is now: " + inactive);
     }
@@ -740,6 +1056,22 @@ public class Deploy {
             command = "sudo " + command;
         }
         ssh(adminUser, command);
+    }
+
+    /** Like sshAsRoot but allocates a pseudo-terminal (-t) so remote interactive reads work. */
+    static void sshAsRootInteractive(String command) throws Exception {
+        if (!"root".equals(adminUser)) {
+            command = "sudo " + command;
+        }
+        int exit = new ProcessBuilder("ssh", "-t", "-i", sshKey, "-o", "StrictHostKeyChecking=accept-new",
+                adminUser + "@" + host, command)
+                .inheritIO()
+                .start()
+                .waitFor();
+        if (exit != 0) {
+            System.err.println("Remote command failed (exit " + exit + ")");
+            System.exit(exit);
+        }
     }
 
     static String sshOutputAsRoot(String command) throws Exception {
