@@ -269,17 +269,24 @@ public class Deploy {
             echo "--- Health check $INACTIVE_LABEL ($HEALTH_URL, up to 60s) ---"
             HEALTHY=0
             for i in $(seq 1 30); do
-                if curl -s --max-time 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then
-                    HEALTHY=1
-                    echo "App responded after $((i * 2))s"
+                if ! systemctl is-active --quiet "$INACTIVE_SERVICE"; then
+                    echo "  ERROR: $INACTIVE_LABEL stopped unexpectedly — aborting health check" >&2
                     break
                 fi
+                if curl -s --max-time 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then
+                    HEALTHY=1
+                    echo "  $INACTIVE_LABEL healthy after $((i * 2))s"
+                    break
+                fi
+                echo "  Waiting for $INACTIVE_LABEL ... ($((i * 2))s / 60s)"
                 sleep 2
             done
 
             if [ "$HEALTHY" = "0" ]; then
-                echo "ERROR: Health check failed after 60s — rolling back" >&2
-                systemctl stop "$INACTIVE_SERVICE" || true
+                echo "ERROR: Health check failed — rolling back (stopping $INACTIVE_LABEL)" >&2
+                systemctl kill "$INACTIVE_SERVICE" 2>/dev/null || true
+                systemctl stop "$INACTIVE_SERVICE" 2>/dev/null || true
+                echo "Hint: run 'Deploy logs inactive' to see why $INACTIVE_LABEL failed to start" >&2
                 exit 1
             fi
 
@@ -384,17 +391,24 @@ public class Deploy {
             echo "--- Health check $INACTIVE_LABEL ($HEALTH_URL, up to 60s) ---"
             HEALTHY=0
             for i in $(seq 1 30); do
-                if curl -s --max-time 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then
-                    HEALTHY=1
-                    echo "App responded after $((i * 2))s"
+                if ! systemctl is-active --quiet "$INACTIVE_SERVICE"; then
+                    echo "  ERROR: $INACTIVE_LABEL stopped unexpectedly — aborting health check" >&2
                     break
                 fi
+                if curl -s --max-time 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then
+                    HEALTHY=1
+                    echo "  $INACTIVE_LABEL healthy after $((i * 2))s"
+                    break
+                fi
+                echo "  Waiting for $INACTIVE_LABEL ... ($((i * 2))s / 60s)"
                 sleep 2
             done
 
             if [ "$HEALTHY" = "0" ]; then
-                echo "ERROR: Health check failed after 60s — rolling back" >&2
-                systemctl stop "$INACTIVE_SERVICE" || true
+                echo "ERROR: Health check failed — rolling back (stopping $INACTIVE_LABEL)" >&2
+                systemctl kill "$INACTIVE_SERVICE" 2>/dev/null || true
+                systemctl stop "$INACTIVE_SERVICE" 2>/dev/null || true
+                echo "Hint: run 'Deploy logs inactive' to see why $INACTIVE_LABEL failed to start" >&2
                 exit 1
             fi
 
@@ -523,7 +537,8 @@ public class Deploy {
         System.out.println("Commands:");
         System.out.println("  init           - Set up the server (run once)");
         System.out.println("  deploy         - Build, sync, and restart the app");
-        System.out.println("  logs [n]       - Tail the application logs (default: 200 lines)");
+        System.out.println("  logs [n] [slot] - Tail the application logs (default: 200 lines)");
+        System.out.println("                    slot: active (default), inactive, blue, green");
         System.out.println("  add-key [file] - Add an SSH public key to the server");
         System.out.println("  clean          - Remove the app, service, and user from the server");
     }
@@ -875,11 +890,29 @@ public class Deploy {
     // logs – tail journalctl
     // -----------------------------------------------------------------------
     static void logs(String[] args) throws Exception {
-        String lines = args.length > 1 ? args[1] : "200";
+        String lines = "200";
+        String slotArg = null;
+        for (int i = 1; i < args.length; i++) {
+            String arg = args[i];
+            if (arg.matches("[0-9]+")) lines = arg;
+            else slotArg = arg;
+        }
         String unitName = user;
         if (blueGreen) {
             String active = sshOutputAsRoot("cat /home/" + user + "/active 2>/dev/null || echo blue").trim();
-            unitName = user + "-" + (active.isBlank() ? "blue" : active);
+            if (active.isBlank()) active = "blue";
+            String inactive = "blue".equals(active) ? "green" : "blue";
+            String slot = switch (slotArg == null ? "active" : slotArg) {
+                case "inactive"       -> inactive;
+                case "blue", "green"  -> slotArg;
+                case "active"         -> active;
+                default -> {
+                    System.err.println("Unknown slot '" + slotArg + "'. Use: blue, green, active, inactive");
+                    System.exit(1);
+                    yield active;
+                }
+            };
+            unitName = user + "-" + slot;
         }
         String cmd = "journalctl -u " + unitName + " -n " + lines + " -f";
         if (!"root".equals(adminUser)) {

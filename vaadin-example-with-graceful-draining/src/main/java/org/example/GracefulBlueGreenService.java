@@ -2,7 +2,9 @@ package org.example;
 
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.server.ServiceInitEvent;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.vaadin.firitin.util.BrowserCookie;
@@ -31,6 +33,13 @@ public class GracefulBlueGreenService {
     // APP_SLOT environment variable (set by systemd service, e.g. APP_SLOT=blue)
     @Value("${app.slot:local}")
     private String slot;
+
+    @PostConstruct
+    void init() {
+        // Uncomment to test a failing deployment (Deploy script should keep the previous version)
+        //System.err.println("Killing server for demo purposes...");
+        //System.exit(1);
+    }
 
     public String getSlot() {
         return slot;

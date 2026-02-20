@@ -90,9 +90,19 @@ Builds and deploys the app. This is the default command — running `Deploy` (wi
  2. **Spring Boot:** extracts the fat jar for [efficient rsync](https://docs.spring.io/spring-boot/reference/packaging/efficient.html); **Quarkus:** uses the already-exploded `target/quarkus-app` directly
  3. Rsyncs to the server — only changed files are transferred (dependency jars rarely change)
 
-### `Deploy logs`
+When `BLUE_GREEN=yes`, the deploy performs a zero-downtime swap and includes an **automatic rollback**: the new slot is health-checked for up to 60 seconds before traffic is switched. If the new version fails to start or exits prematurely, the deploy script stops it, reports the failure, and leaves the current slot running untouched.
 
-Tails the application journal output via SSH.
+### `Deploy logs [n] [slot]`
+
+Tails the application journal output via SSH. With blue-green deployment, tails the **active** slot by default. An optional slot argument selects a different node:
+
+```bash
+Deploy logs              # active slot, last 200 lines
+Deploy logs 500          # active slot, last 500 lines
+Deploy logs inactive     # inactive slot — useful after a failed deploy
+Deploy logs blue         # blue slot specifically
+Deploy logs green        # green slot specifically
+```
 
 ### `Deploy add-key [file]`
 
