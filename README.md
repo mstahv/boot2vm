@@ -181,6 +181,8 @@ The `vaadin-example-with-graceful-draining/` directory contains a complete worki
 - Receiving the `POST /actuator/new-version` notification with the deadline timestamp, and showing a dismissible "New version available — upgrade by HH:mm UTC" banner with an **Upgrade now** button
 - Distinguishing automatic, user-initiated, and forced migrations on the new server so each gets an appropriate welcome message
 
+To test **automatic rollback**, uncomment the `System.exit(1)` line in the `@PostConstruct init()` method of `GracefulBlueGreenService`. The next deploy will start the new slot, fail the health check, stop the broken instance, and leave the previous version running. Use `Deploy logs inactive` to inspect the startup logs of the failed slot.
+
 ## For later
 
  * Nginx as an alternative reverse proxy option
