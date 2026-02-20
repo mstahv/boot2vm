@@ -11,7 +11,7 @@ public class Deploy {
     static String host, user, domain, sshKey, adminUser, proxy, appType;
     static boolean https, blueGreen;
     static boolean gracefulDrain;
-    static String slotCookie = "X-Server-Slot", managementPort = "", notifyPath = "/actuator/new-version", activeUsersPath = "/actuator/active-users";
+    static String slotCookie = "X-Slot", managementPort = "", notifyPath = "/actuator/new-version", activeUsersPath = "/actuator/active-users";
     static int drainTimeout = 300;
 
     static final String SETUP_SCRIPT = """
@@ -321,7 +321,7 @@ public class Deploy {
             PROXY="${2:-caddy}"
             HTTPS="${3:-yes}"
             DOMAIN="$4"
-            SLOT_COOKIE="${5:-X-Server-Slot}"
+            SLOT_COOKIE="${5:-X-Slot}"
             DRAIN_TIMEOUT="${6:-300}"
             NOTIFY_PATH="${7:-/actuator/new-version}"
             ACTIVE_USERS_PATH="${8:-/actuator/active-users}"
@@ -548,7 +548,7 @@ public class Deploy {
         appType = props.getProperty("APP_TYPE", "spring-boot");
         blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
         gracefulDrain = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN_GRACEFUL", "no"));
-        slotCookie = props.getProperty("SLOT_COOKIE", "X-Server-Slot");
+        slotCookie = props.getProperty("SLOT_COOKIE", "X-Slot");
         drainTimeout = Integer.parseInt(props.getProperty("DRAIN_TIMEOUT", "300"));
         managementPort = props.getProperty("MANAGEMENT_PORT", "");
         notifyPath = props.getProperty("NOTIFY_PATH", "/actuator/new-version");
@@ -643,7 +643,7 @@ public class Deploy {
             gracefulDrain = "yes".equalsIgnoreCase(gracefulDrainStr);
             if (gracefulDrain) {
                 slotCookie = prompt(console, "Slot cookie name",
-                        defaultSlotCookie != null ? defaultSlotCookie : "X-Server-Slot");
+                        defaultSlotCookie != null ? defaultSlotCookie : "X-Slot");
                 String drainTimeoutStr = prompt(console, "Drain timeout (seconds)",
                         defaultDrainTimeout != null ? defaultDrainTimeout : "300");
                 drainTimeout = Integer.parseInt(drainTimeoutStr);

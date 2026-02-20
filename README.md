@@ -134,7 +134,7 @@ When `BLUE_GREEN=yes`, you can additionally enable `BLUE_GREEN_GRACEFUL=yes` to 
 ### How it works
 
 1. The new version is deployed to the inactive slot and health-checked as normal.
-2. Caddy is reconfigured to split traffic: users carrying a slot cookie (`X-Server-Slot=blue`) continue to reach the old server; everyone else is routed to the new server.
+2. Caddy is reconfigured to split traffic: users carrying a slot cookie (`X-Slot=blue`) continue to reach the old server; everyone else is routed to the new server.
 3. The old server is notified via `POST /actuator/new-version` with a `{"deadline":"<UTC timestamp>"}` body indicating when forced cutover will happen, so it can show a "New version available — upgrade by HH:mm UTC" banner.
 4. The deploy script polls `GET /actuator/active-users` on the old server every 10 s, waiting for `{"count": 0}`. Each poll prints the remaining time until forced cutover. Press **D** at any point to skip the drain and force an immediate cutover.
 5. Once drained (or `DRAIN_TIMEOUT` seconds have elapsed, or **D** was pressed), Caddy is switched to the new backend only and the old service is stopped.
@@ -144,7 +144,7 @@ When `BLUE_GREEN=yes`, you can additionally enable `BLUE_GREEN_GRACEFUL=yes` to 
 | What | How |
 |------|-----|
 | **Slot env var** | The systemd service sets `APP_SLOT=blue` (or `green`). The app reads this at startup and uses it as the cookie value. |
-| **Slot cookie** | The app sets `Set-Cookie: X-Server-Slot=<APP_SLOT>` on responses for users it wants to keep on the current server. When a user voluntarily upgrades, the app clears the cookie and reloads — the next request has no pinning cookie and lands on the new server. |
+| **Slot cookie** | The app sets `Set-Cookie: X-Slot=<APP_SLOT>` on responses for users it wants to keep on the current server. When a user voluntarily upgrades, the app clears the cookie and reloads — the next request has no pinning cookie and lands on the new server. |
 | `POST /actuator/new-version` | Called once when traffic is being split. The JSON body `{"deadline":"<ISO-8601 UTC>"}` carries the forced-cutover timestamp — use it to show a "upgrade by HH:mm UTC" notification. Failure is non-fatal. |
 | `GET /actuator/active-users` | Polled every 10 s. Must return `{"count": N}`. Return `{"count": 0}` when the server considers itself safe to stop. |
 
@@ -153,7 +153,7 @@ When `BLUE_GREEN=yes`, you can additionally enable `BLUE_GREEN_GRACEFUL=yes` to 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `BLUE_GREEN_GRACEFUL` | `no` | Enable graceful drain (requires `BLUE_GREEN=yes`) |
-| `SLOT_COOKIE` | `X-Server-Slot` | Cookie name used for server pinning |
+| `SLOT_COOKIE` | `X-Slot` | Cookie name used for server pinning |
 | `DRAIN_TIMEOUT` | `300` | Seconds to wait before forcing cutover |
 | `MANAGEMENT_PORT` | *(app port)* | Management port for blue slot; green = this + 1 |
 | `NOTIFY_PATH` | `/actuator/new-version` | POST path for new-version notification |
@@ -166,7 +166,7 @@ If `DRAIN_TIMEOUT` expires before the count reaches 0, the deploy script logs "F
 The `vaadin-example-with-graceful-draining/` directory contains a complete working example of the API contract above, built with Vaadin and Spring Boot. It demonstrates:
 
 - Reading `APP_SLOT` via `@Value("${app.slot:local}")` and using it as the cookie value
-- Pinning a user to the current slot on demand (sets the `X-Server-Slot` cookie via `BrowserCookie`)
+- Pinning a user to the current slot on demand (sets the `X-Slot` cookie via `BrowserCookie`)
 - Tracking pinned UIs in a thread-safe set and exposing the count via `GET /actuator/active-users`
 - Receiving the `POST /actuator/new-version` notification with the deadline timestamp, and showing a dismissible "New version available — upgrade by HH:mm UTC" banner with an **Upgrade now** button
 - Distinguishing automatic, user-initiated, and forced migrations on the new server so each gets an appropriate welcome message
