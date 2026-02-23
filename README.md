@@ -108,6 +108,21 @@ Deploy logs green        # green slot specifically
 
 Adds an SSH public key to the app user's `authorized_keys` on the server, granting deploy access to a colleague or CI server. Pass a key file path as argument, or run without arguments to paste a key directly. Duplicate keys are detected and skipped.
 
+### `Deploy env [set|remove|list]`
+
+Manages environment variables on the server. Variables are stored in `/home/$USER/.env` and loaded by systemd — they never exist locally, so there is no risk of committing secrets to version control.
+
+```bash
+Deploy env set SPRING_DATASOURCE_URL=jdbc:postgresql://db:5432/myapp
+Deploy env set DB_PASSWORD=secret API_KEY=sk-abc123
+Deploy env list
+Deploy env remove DB_PASSWORD
+```
+
+`set` and `remove` automatically restart the service. With blue-green deployment, this triggers a proper blue-green swap for zero downtime.
+
+Note: values with spaces must be quoted (`KEY="value with spaces"`), `#` lines are comments, no `export` prefix. During `Deploy init`, you can also enter environment variables interactively so the app starts with the right config on first deploy.
+
 ### `Deploy clean`
 
 Removes the deployed application from the server: stops and removes the systemd service, resets the Caddy config (if used), and deletes the app user and its home directory. JDK, Caddy, and other system packages are left installed. Useful for testing or starting fresh — run `Deploy init` again afterwards to re-provision.

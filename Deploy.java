@@ -116,6 +116,7 @@ public class Deploy {
             Environment=QUARKUS_HTTP_PORT=$SLOT_PORT
             Environment=APP_SLOT=$SLOT
             $MGMT_ENV_LINE
+            EnvironmentFile=-/home/$APP_USER/.env
             ExecStart=$EXEC_START
             Restart=on-failure
             RestartSec=10
@@ -141,6 +142,7 @@ public class Deploy {
             Type=simple
             User=$APP_USER
             WorkingDirectory=/home/$APP_USER/app
+            EnvironmentFile=-/home/$APP_USER/.env
             ExecStart=$EXEC_START
             Restart=on-failure
             RestartSec=10
@@ -521,6 +523,7 @@ public class Deploy {
             case "init" -> init();
             case "deploy" -> { loadConfig(); deploy(); }
             case "logs" -> { loadConfig(); logs(args); }
+            case "env" -> { loadConfig(); env(args); }
             case "add-key" -> { loadConfig(); addKey(args); }
             case "clean" -> { loadConfig(); clean(); }
             default -> {
@@ -539,6 +542,10 @@ public class Deploy {
         System.out.println("  deploy         - Build, sync, and restart the app");
         System.out.println("  logs [n] [slot] - Tail the application logs (default: 200 lines)");
         System.out.println("                    slot: active (default), inactive, blue, green");
+        System.out.println("  env            - List environment variables on the server");
+        System.out.println("  env set K=V    - Set env var(s), then restart the service");
+        System.out.println("  env remove K   - Remove env var(s), then restart the service");
+        System.out.println("  env list       - List environment variables on the server");
         System.out.println("  add-key [file] - Add an SSH public key to the server");
         System.out.println("  clean          - Remove the app, service, and user from the server");
     }
@@ -681,6 +688,20 @@ public class Deploy {
             exposeNodes = "yes".equalsIgnoreCase(exposeNodesStr);
         }
 
+        // Collect environment variables
+        System.out.println("Enter environment variables for the app (stored on server only, never locally).");
+        System.out.println("Format: KEY=VALUE (values with spaces must be quoted: KEY=\"value with spaces\")");
+        var envVars = new ArrayList<String>();
+        while (true) {
+            String entry = console.readLine("Environment variable (KEY=VALUE, blank to finish): ").trim();
+            if (entry.isEmpty()) break;
+            if (!entry.contains("=")) {
+                System.err.println("  Invalid format — expected KEY=VALUE");
+                continue;
+            }
+            envVars.add(entry);
+        }
+
         // Write vmhosting.conf
         Files.writeString(configPath,
                 "HOST=" + host + "\n"
@@ -727,6 +748,20 @@ public class Deploy {
                 + " " + (exposeNodes ? "yes" : "no"));
 
         Files.delete(tempScript);
+
+        // Write env vars to server if any were provided
+        if (!envVars.isEmpty()) {
+            System.out.println("Writing environment variables to server ...");
+            var envContent = new StringBuilder();
+            for (String entry : envVars) {
+                envContent.append(entry).append("\n");
+            }
+            String escaped = envContent.toString().replace("'", "'\\''");
+            sshAsRoot("printf '%s' '" + escaped + "' > /home/" + user + "/.env"
+                    + " && chown " + user + ":" + user + " /home/" + user + "/.env"
+                    + " && chmod 600 /home/" + user + "/.env");
+        }
+
         System.out.println("Server initialized successfully.\n");
 
         // Automatically run first deploy
@@ -1023,6 +1058,108 @@ public class Deploy {
 
         Files.deleteIfExists(Path.of("vmhosting.conf"));
         System.out.println("Server cleaned and vmhosting.conf removed. Run 'init' to start fresh.");
+    }
+
+    // -----------------------------------------------------------------------
+    // env – manage environment variables on the server
+    // -----------------------------------------------------------------------
+    static void env(String[] args) throws Exception {
+        String subcommand = args.length > 1 ? args[1] : "list";
+        switch (subcommand) {
+            case "list" -> envList();
+            case "set" -> envSet(args);
+            case "remove" -> envRemove(args);
+            default -> {
+                System.err.println("Unknown env subcommand: " + subcommand);
+                System.err.println("Usage: Deploy env [set|remove|list]");
+                System.exit(1);
+            }
+        }
+    }
+
+    static void envList() throws Exception {
+        String output = sshOutputAsRoot("cat /home/" + user + "/.env 2>/dev/null || true").trim();
+        if (output.isEmpty()) {
+            System.out.println("No environment variables set on the server.");
+            System.out.println("Use 'Deploy env set KEY=VALUE' to add variables.");
+        } else {
+            System.out.println(output);
+        }
+    }
+
+    static void envSet(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: Deploy env set KEY=VALUE [KEY2=VALUE2 ...]");
+            System.exit(1);
+        }
+        String envFile = "/home/" + user + "/.env";
+        for (int i = 2; i < args.length; i++) {
+            String entry = args[i];
+            if (!entry.contains("=")) {
+                System.err.println("Invalid format: " + entry + " — expected KEY=VALUE");
+                System.exit(1);
+            }
+            String key = entry.substring(0, entry.indexOf('='));
+            String escaped = entry.replace("'", "'\\''");
+            // Create file if missing, remove existing key if present, then append
+            sshAsRoot("touch " + envFile
+                    + " && sed -i '/^" + key + "=/d' " + envFile
+                    + " && echo '" + escaped + "' >> " + envFile);
+            System.out.println("  " + key + " set");
+        }
+        sshAsRoot("chown " + user + ":" + user + " " + envFile
+                + " && chmod 600 " + envFile);
+        restartService();
+    }
+
+    static void envRemove(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: Deploy env remove KEY [KEY2 ...]");
+            System.exit(1);
+        }
+        String envFile = "/home/" + user + "/.env";
+        for (int i = 2; i < args.length; i++) {
+            String key = args[i];
+            sshAsRoot("sed -i '/^" + key + "=/d' " + envFile);
+            System.out.println("  " + key + " removed");
+        }
+        restartService();
+    }
+
+    /** Restart the service after env var changes — blue-green uses a slot swap for zero downtime. */
+    static void restartService() throws Exception {
+        if (blueGreen) {
+            System.out.println("Performing blue-green swap for zero-downtime env change ...");
+            String activeRaw = sshOutputAsRoot("cat /home/" + user + "/active 2>/dev/null || echo blue").trim();
+            String active = activeRaw.isBlank() ? "blue" : activeRaw;
+            String inactive = "blue".equals(active) ? "green" : "blue";
+            String mgmtPortBlue = (managementPort != null && !managementPort.isBlank()) ? managementPort : "0";
+
+            // Rsync active slot to inactive so both run the same app code
+            sshAsRoot("rsync -a --delete /home/" + user + "/app-" + active + "/ /home/" + user + "/app-" + inactive + "/");
+
+            if (gracefulDrain) {
+                Path tempScript = Files.createTempFile("bg-graceful", ".sh");
+                Files.writeString(tempScript, BLUE_GREEN_GRACEFUL_SCRIPT);
+                scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-graceful.sh");
+                Files.delete(tempScript);
+                sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+                        + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
+                        + " " + mgmtPortBlue);
+            } else {
+                Path tempScript = Files.createTempFile("bg-swap", ".sh");
+                Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
+                scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
+                Files.delete(tempScript);
+                sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+                        + " " + mgmtPortBlue);
+            }
+            System.out.println("Service restarted (blue-green swap complete).");
+        } else {
+            System.out.println("Restarting service ...");
+            sshAsRoot("systemctl restart " + user);
+            System.out.println("Service restarted.");
+        }
     }
 
     // -----------------------------------------------------------------------
