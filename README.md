@@ -67,13 +67,13 @@ Interactive one-time setup. Prompts for connection details, writes a `vmhosting.
 ```
 Host: myapp.example.com
 App user [myapp]:
-Domain [myapp.example.com]:
+Domain(s) (comma-separated for multiple) [myapp.example.com]:
 SSH public key [~/.ssh/id_rsa.pub]:
 Admin SSH user [root]:
 HTTPS [yes]:
 Reverse proxy (caddy/none) [caddy]:
 App type (spring-boot/quarkus) [spring-boot]:
-Only the host is required — sensible defaults are derived for the rest. The server setup:
+Only the host is required — sensible defaults are derived for the rest. Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
 
  1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot when required
  2. Installs **JDK 25** (Eclipse Adoptium / Temurin)

@@ -27,6 +27,16 @@ public class Deploy {
             MANAGEMENT_PORT_BLUE="${8:-0}"
             FIREWALL="${9:-yes}"
             EXPOSE_NODES="${10:-no}"
+
+            # Build Caddy site address (supports multiple domains)
+            if [ "$HTTPS" = "yes" ]; then
+                SITE_ADDR="$DOMAIN"
+            else
+                SITE_ADDR=""
+                for d in $DOMAIN; do SITE_ADDR="$SITE_ADDR http://$d"; done
+                SITE_ADDR="${SITE_ADDR# }"
+            fi
+
             echo "=== Setting up server for user '$APP_USER' with domain '$DOMAIN' ==="
 
             # Wait for any background apt/dpkg process to release the lock
@@ -164,19 +174,11 @@ public class Deploy {
                     > /etc/apt/sources.list.d/caddy-stable.list
                 apt-get update
                 apt-get install -y caddy
-                if [ "$HTTPS" = "yes" ]; then
-                    cat > /etc/caddy/Caddyfile << CADDY
-            $DOMAIN {
+                cat > /etc/caddy/Caddyfile << CADDY
+            $SITE_ADDR {
                 reverse_proxy localhost:8080
             }
             CADDY
-                else
-                    cat > /etc/caddy/Caddyfile << CADDY
-            http://$DOMAIN {
-                reverse_proxy localhost:8080
-            }
-            CADDY
-                fi
                 systemctl reload caddy
             else
                 echo "--- Skipping reverse proxy installation ---"
@@ -217,6 +219,15 @@ public class Deploy {
             HTTPS="${3:-yes}"
             DOMAIN="$4"
             MANAGEMENT_PORT_BLUE="${5:-0}"
+
+            # Build Caddy site address (supports multiple domains)
+            if [ "$HTTPS" = "yes" ]; then
+                SITE_ADDR="$DOMAIN"
+            else
+                SITE_ADDR=""
+                for d in $DOMAIN; do SITE_ADDR="$SITE_ADDR http://$d"; done
+                SITE_ADDR="${SITE_ADDR# }"
+            fi
 
             LOCK_DIR="/home/$APP_USER/deploy.lock"
             ACTIVE_FILE="/home/$APP_USER/active"
@@ -295,19 +306,11 @@ public class Deploy {
             # Swap traffic at the reverse proxy
             if [ "$PROXY" = "caddy" ]; then
                 echo "--- Swapping Caddy to $INACTIVE_LABEL ---"
-                if [ "$HTTPS" = "yes" ]; then
-                    cat > /etc/caddy/Caddyfile << CADDY
-            $DOMAIN {
+                cat > /etc/caddy/Caddyfile << CADDY
+            $SITE_ADDR {
                 reverse_proxy localhost:$INACTIVE_PORT
             }
             CADDY
-                else
-                    cat > /etc/caddy/Caddyfile << CADDY
-            http://$DOMAIN {
-                reverse_proxy localhost:$INACTIVE_PORT
-            }
-            CADDY
-                fi
                 systemctl reload caddy
             fi
 
@@ -335,6 +338,15 @@ public class Deploy {
             NOTIFY_PATH="${7:-/actuator/new-version}"
             ACTIVE_USERS_PATH="${8:-/actuator/active-users}"
             MANAGEMENT_PORT_BLUE="${9:-0}"
+
+            # Build Caddy site address (supports multiple domains)
+            if [ "$HTTPS" = "yes" ]; then
+                SITE_ADDR="$DOMAIN"
+            else
+                SITE_ADDR=""
+                for d in $DOMAIN; do SITE_ADDR="$SITE_ADDR http://$d"; done
+                SITE_ADDR="${SITE_ADDR# }"
+            fi
 
             LOCK_DIR="/home/$APP_USER/deploy.lock"
             ACTIVE_FILE="/home/$APP_USER/active"
@@ -417,9 +429,8 @@ public class Deploy {
             # Write split-traffic Caddyfile (cookie-pinned users stay on old slot)
             if [ "$PROXY" = "caddy" ]; then
                 echo "--- Writing drain-mode Caddyfile (old=$ACTIVE_LABEL new=$INACTIVE_LABEL, cookie $SLOT_COOKIE=$ACTIVE) ---"
-                if [ "$HTTPS" = "yes" ]; then
-                    cat > /etc/caddy/Caddyfile << CADDY
-            $DOMAIN {
+                cat > /etc/caddy/Caddyfile << CADDY
+            $SITE_ADDR {
                 @old_slot {
                     header Cookie *$SLOT_COOKIE=$ACTIVE*
                 }
@@ -429,19 +440,6 @@ public class Deploy {
                 reverse_proxy localhost:$INACTIVE_PORT
             }
             CADDY
-                else
-                    cat > /etc/caddy/Caddyfile << CADDY
-            http://$DOMAIN {
-                @old_slot {
-                    header Cookie *$SLOT_COOKIE=$ACTIVE*
-                }
-                route @old_slot {
-                    reverse_proxy localhost:$ACTIVE_PORT
-                }
-                reverse_proxy localhost:$INACTIVE_PORT
-            }
-            CADDY
-                fi
                 systemctl reload caddy
             fi
 
@@ -488,19 +486,11 @@ public class Deploy {
             # Switch Caddy to serve only the new backend
             if [ "$PROXY" = "caddy" ]; then
                 echo "--- Switching Caddy to $INACTIVE_LABEL only ---"
-                if [ "$HTTPS" = "yes" ]; then
-                    cat > /etc/caddy/Caddyfile << CADDY
-            $DOMAIN {
+                cat > /etc/caddy/Caddyfile << CADDY
+            $SITE_ADDR {
                 reverse_proxy localhost:$INACTIVE_PORT
             }
             CADDY
-                else
-                    cat > /etc/caddy/Caddyfile << CADDY
-            http://$DOMAIN {
-                reverse_proxy localhost:$INACTIVE_PORT
-            }
-            CADDY
-                fi
                 systemctl reload caddy
             fi
 
@@ -643,7 +633,8 @@ public class Deploy {
 
         // USER, DOMAIN, SSH_KEY, ADMIN_USER – with defaults
         user = prompt(console, "App user", defaultUser != null ? defaultUser : derivedUser);
-        domain = prompt(console, "Domain", defaultDomain != null ? defaultDomain : host);
+        String domainRaw = prompt(console, "Domain(s) (comma-separated for multiple)", defaultDomain != null ? defaultDomain : host);
+        domain = domainRaw.replaceAll("\\s*,\\s*", " ").trim();
         String sshKeyRaw = prompt(console, "SSH public key",
                 defaultKey != null ? defaultKey : "~/.ssh/id_rsa.pub");
         adminUser = prompt(console, "Admin SSH user",
@@ -741,7 +732,7 @@ public class Deploy {
         scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/setup-server.sh");
         sshAsRoot("chmod +x /tmp/setup-server.sh");
         sshAsRoot("/tmp/setup-server.sh "
-                + user + " " + domain + " " + adminUser + " " + (https ? "yes" : "no")
+                + user + " '" + domain + "' " + adminUser + " " + (https ? "yes" : "no")
                 + " " + proxy + " " + appType + " " + (blueGreen ? "yes" : "no")
                 + " " + (managementPort != null && !managementPort.isBlank() ? managementPort : "0")
                 + " " + (firewall ? "yes" : "no")
@@ -905,7 +896,7 @@ public class Deploy {
             Files.writeString(tempScript, BLUE_GREEN_GRACEFUL_SCRIPT);
             scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-graceful.sh");
             Files.delete(tempScript);
-            sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+            sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
                     + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
                     + " " + mgmtPortBlue);
         } else {
@@ -914,7 +905,7 @@ public class Deploy {
             Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
             scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
             Files.delete(tempScript);
-            sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+            sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
                     + " " + mgmtPortBlue);
         }
 
@@ -1143,7 +1134,7 @@ public class Deploy {
                 Files.writeString(tempScript, BLUE_GREEN_GRACEFUL_SCRIPT);
                 scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-graceful.sh");
                 Files.delete(tempScript);
-                sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+                sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
                         + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
                         + " " + mgmtPortBlue);
             } else {
@@ -1151,7 +1142,7 @@ public class Deploy {
                 Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
                 scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
                 Files.delete(tempScript);
-                sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " " + domain
+                sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
                         + " " + mgmtPortBlue);
             }
             System.out.println("Service restarted (blue-green swap complete).");
