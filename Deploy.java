@@ -748,9 +748,9 @@ public class Deploy {
                 envContent.append(entry).append("\n");
             }
             String escaped = envContent.toString().replace("'", "'\\''");
-            sshAsRoot("printf '%s' '" + escaped + "' > /home/" + user + "/.env"
-                    + " && chown " + user + ":" + user + " /home/" + user + "/.env"
-                    + " && chmod 600 /home/" + user + "/.env");
+            sshAsRoot("printf '%s' '" + escaped + "' > /home/" + user + "/.env");
+            sshAsRoot("chown " + user + ":" + user + " /home/" + user + "/.env");
+            sshAsRoot("chmod 600 /home/" + user + "/.env");
         }
 
         System.out.println("Server initialized successfully.\n");
@@ -1092,14 +1092,14 @@ public class Deploy {
             }
             String key = entry.substring(0, entry.indexOf('='));
             String escaped = entry.replace("'", "'\\''");
-            // Create file if missing, remove existing key if present, then append
-            sshAsRoot("touch " + envFile
-                    + " && sed -i '/^" + key + "=/d' " + envFile
-                    + " && echo '" + escaped + "' >> " + envFile);
+            // Create file if missing and ensure correct ownership/permissions
+            sshAsRoot("touch " + envFile);
+            sshAsRoot("chown " + user + ":" + user + " " + envFile);
+            sshAsRoot("chmod 600 " + envFile);
+            sshAsRoot("sed -i '/^" + key + "=/d' " + envFile);
+            sshAsRoot("sh -c " + "'echo \"" + escaped + "\" >> " + envFile + "'");
             System.out.println("  " + key + " set");
         }
-        sshAsRoot("chown " + user + ":" + user + " " + envFile
-                + " && chmod 600 " + envFile);
         restartService();
     }
 
@@ -1109,6 +1109,10 @@ public class Deploy {
             System.exit(1);
         }
         String envFile = "/home/" + user + "/.env";
+        // Ensure file exists and has correct ownership/permissions
+        sshAsRoot("touch " + envFile);
+        sshAsRoot("chown " + user + ":" + user + " " + envFile);
+        sshAsRoot("chmod 600 " + envFile);
         for (int i = 2; i < args.length; i++) {
             String key = args[i];
             sshAsRoot("sed -i '/^" + key + "=/d' " + envFile);
