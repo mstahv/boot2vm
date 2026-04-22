@@ -4,6 +4,8 @@ Raw virtual machines are very cheap and efficient way to deploy apps — no cont
 
 **boot2vm** is a single-file [JBang](https://www.jbang.dev/) tool that configures a fresh server for simple hosting setup and deploys Spring Boot and Quarkus apps to it. Just SSH, rsync, systemd, and Caddy (as reverse proxy). That's it.
 
+Also works for headless Java services that don't expose web endpoints (e.g. a Raspberry Pi reading sensors and pushing to the cloud) — answer "no" to the web endpoints question during `init` and the reverse proxy and 80/443 firewall rules are skipped; rsync, systemd service, env vars, and restart-on-update still work the same.
+
 While the name says "VM", the tool is not technically tied to virtual machines or Ubuntu — any Debian-based server with `apt` should work. Tested successfully against Raspberry Pi OS as well.
 
 ### Pros
@@ -67,12 +69,13 @@ Interactive one-time setup. Prompts for connection details, writes a `vmhosting.
 ```
 Host: myapp.example.com
 App user [myapp]:
+Does this service expose web endpoints (yes/no) [yes]:
 Domain(s) (comma-separated for multiple) [myapp.example.com]:
 SSH public key [~/.ssh/id_rsa.pub]:
 Admin SSH user [root]:
 HTTPS [yes]:
 Reverse proxy (caddy/none) [caddy]:
-App type (spring-boot/quarkus) [spring-boot]:
+App type (spring-boot/quarkus/plain) [spring-boot]:
 Only the host is required — sensible defaults are derived for the rest. Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
 
  1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot when required
@@ -133,7 +136,7 @@ APP_TYPE=spring-boot
  * `SSH_KEY` – Path to SSH public key (private key is derived automatically)
  * `ADMIN_USER` – SSH user for server admin commands (uses sudo if not root)
  * `PROXY` – Reverse proxy to install: `caddy` (default) or `none`
- * `APP_TYPE` – Application type: `spring-boot` (default) or `quarkus` (auto-detected from build files)
+ * `APP_TYPE` – Application type: `spring-boot` (default), `quarkus`, or `plain` (runnable fat jar — auto-detected from build files; `original-*.jar` and `*-plain.jar` are ignored when locating the artifact)
 jbang app install https://github.com/mstahv/boot2vm/blob/main/Deploy.java
 
 # Scaffold a new Vaadin + Spring Boot app

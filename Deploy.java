@@ -11,6 +11,7 @@ public class Deploy {
     static String host, user, domain, sshKey, adminUser, proxy, appType;
     static boolean https, blueGreen;
     static boolean gracefulDrain;
+    static boolean webService = true;
     static String slotCookie = "X-Slot", managementPort = "", notifyPath = "/actuator/new-version", activeUsersPath = "/actuator/active-users";
     static int drainTimeout = 300;
 
@@ -27,6 +28,7 @@ public class Deploy {
             MANAGEMENT_PORT_BLUE="${8:-0}"
             FIREWALL="${9:-yes}"
             EXPOSE_NODES="${10:-no}"
+            WEB_SERVICE="${11:-yes}"
 
             # Build Caddy site address (supports multiple domains)
             if [ "$HTTPS" = "yes" ]; then
@@ -164,8 +166,10 @@ public class Deploy {
                 systemctl enable "$APP_USER"
             fi
 
-            # 6. Install reverse proxy (if configured)
-            if [ "$PROXY" = "caddy" ]; then
+            # 6. Install reverse proxy (if configured and this is a web service)
+            if [ "$WEB_SERVICE" != "yes" ]; then
+                echo "--- Not a web service; skipping reverse proxy ---"
+            elif [ "$PROXY" = "caddy" ]; then
                 echo "--- Installing Caddy ---"
                 apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
                 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \\
@@ -192,14 +196,18 @@ public class Deploy {
                 ufw default deny incoming
                 ufw default allow outgoing
                 ufw allow ssh
-                ufw allow 80/tcp
-                ufw allow 443/tcp
-                if [ "$EXPOSE_NODES" = "yes" ]; then
-                    ufw allow 8080/tcp
-                    ufw allow 8081/tcp
+                if [ "$WEB_SERVICE" = "yes" ]; then
+                    ufw allow 80/tcp
+                    ufw allow 443/tcp
+                    if [ "$EXPOSE_NODES" = "yes" ]; then
+                        ufw allow 8080/tcp
+                        ufw allow 8081/tcp
+                    fi
                 fi
                 ufw --force enable
-                if [ "$EXPOSE_NODES" = "yes" ]; then
+                if [ "$WEB_SERVICE" != "yes" ]; then
+                    echo "Firewall enabled: SSH allowed inbound; all else blocked (non-web service)"
+                elif [ "$EXPOSE_NODES" = "yes" ]; then
                     echo "Firewall enabled: SSH, 80/tcp, 443/tcp, 8080/tcp, 8081/tcp allowed inbound"
                 else
                     echo "Firewall enabled: SSH, 80/tcp, 443/tcp allowed inbound; all else blocked"
@@ -557,6 +565,7 @@ public class Deploy {
         adminUser = props.getProperty("ADMIN_USER", "root");
         https = !"no".equalsIgnoreCase(props.getProperty("HTTPS", "yes"));
         proxy = props.getProperty("PROXY", "caddy");
+        webService = !"no".equalsIgnoreCase(props.getProperty("WEB_SERVICE", "yes"));
         appType = props.getProperty("APP_TYPE", "spring-boot");
         blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
         gracefulDrain = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN_GRACEFUL", "no"));
@@ -596,7 +605,7 @@ public class Deploy {
                 defaultProxy = null, defaultAppType = null, defaultBlueGreen = null,
                 defaultGracefulDrain = null, defaultSlotCookie = null, defaultDrainTimeout = null,
                 defaultManagementPort = null, defaultNotifyPath = null, defaultActiveUsersPath = null,
-                defaultFirewall = null, defaultExposeNodes = null;
+                defaultFirewall = null, defaultExposeNodes = null, defaultWebService = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -619,6 +628,7 @@ public class Deploy {
             defaultActiveUsersPath = props.getProperty("ACTIVE_USERS_PATH");
             defaultFirewall = props.getProperty("FIREWALL");
             defaultExposeNodes = props.getProperty("EXPOSE_NODES");
+            defaultWebService = props.getProperty("WEB_SERVICE");
         }
 
         // HOST (required)
@@ -631,49 +641,68 @@ public class Deploy {
         // Derive smart defaults from host
         String derivedUser = host.contains(".") ? host.substring(0, host.indexOf('.')) : host;
 
-        // USER, DOMAIN, SSH_KEY, ADMIN_USER – with defaults
+        // USER, WEB_SERVICE, DOMAIN, SSH_KEY, ADMIN_USER – with defaults
         user = prompt(console, "App user", defaultUser != null ? defaultUser : derivedUser);
-        String domainRaw = prompt(console, "Domain(s) (comma-separated for multiple)", defaultDomain != null ? defaultDomain : host);
+        String webServiceStr = prompt(console, "Does this service expose web endpoints (yes/no)",
+                defaultWebService != null ? defaultWebService : "yes");
+        webService = !"no".equalsIgnoreCase(webServiceStr);
+
+        String domainRaw;
+        if (webService) {
+            domainRaw = prompt(console, "Domain(s) (comma-separated for multiple)", defaultDomain != null ? defaultDomain : host);
+        } else {
+            domainRaw = defaultDomain != null ? defaultDomain : host;
+        }
         domain = domainRaw.replaceAll("\\s*,\\s*", " ").trim();
         String sshKeyRaw = prompt(console, "SSH public key",
                 defaultKey != null ? defaultKey : "~/.ssh/id_rsa.pub");
         adminUser = prompt(console, "Admin SSH user",
                 defaultAdmin != null ? defaultAdmin : "root");
-        String httpsStr = prompt(console, "HTTPS",
-                defaultHttps != null ? defaultHttps : "yes");
-        https = httpsStr.equalsIgnoreCase("yes");
-        proxy = prompt(console, "Reverse proxy (caddy/none)",
-                defaultProxy != null ? defaultProxy : "caddy");
-        appType = prompt(console, "App type (spring-boot/quarkus)",
+        if (webService) {
+            String httpsStr = prompt(console, "HTTPS",
+                    defaultHttps != null ? defaultHttps : "yes");
+            https = httpsStr.equalsIgnoreCase("yes");
+            proxy = prompt(console, "Reverse proxy (caddy/none)",
+                    defaultProxy != null ? defaultProxy : "caddy");
+        } else {
+            https = false;
+            proxy = "none";
+        }
+        appType = prompt(console, "App type (spring-boot/quarkus/plain)",
                 defaultAppType != null ? defaultAppType : detectAppType());
-        String blueGreenStr = prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
-                defaultBlueGreen != null ? defaultBlueGreen : "no");
-        blueGreen = "yes".equalsIgnoreCase(blueGreenStr);
+        if (webService) {
+            String blueGreenStr = prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
+                    defaultBlueGreen != null ? defaultBlueGreen : "no");
+            blueGreen = "yes".equalsIgnoreCase(blueGreenStr);
 
-        if (blueGreen) {
-            String gracefulDrainStr = prompt(console, "Graceful drain mode (yes/no)",
-                    defaultGracefulDrain != null ? defaultGracefulDrain : "no");
-            gracefulDrain = "yes".equalsIgnoreCase(gracefulDrainStr);
-            if (gracefulDrain) {
-                slotCookie = prompt(console, "Slot cookie name",
-                        defaultSlotCookie != null ? defaultSlotCookie : "X-Slot");
-                String drainTimeoutStr = prompt(console, "Drain timeout (seconds)",
-                        defaultDrainTimeout != null ? defaultDrainTimeout : "300");
-                drainTimeout = Integer.parseInt(drainTimeoutStr);
-                managementPort = prompt(console, "Management port (blank = app port)",
-                        defaultManagementPort != null ? defaultManagementPort : "8090");
-                notifyPath = prompt(console, "Notify path",
-                        defaultNotifyPath != null ? defaultNotifyPath : "/actuator/new-version");
-                activeUsersPath = prompt(console, "Active users path",
-                        defaultActiveUsersPath != null ? defaultActiveUsersPath : "/actuator/active-users");
+            if (blueGreen) {
+                String gracefulDrainStr = prompt(console, "Graceful drain mode (yes/no)",
+                        defaultGracefulDrain != null ? defaultGracefulDrain : "no");
+                gracefulDrain = "yes".equalsIgnoreCase(gracefulDrainStr);
+                if (gracefulDrain) {
+                    slotCookie = prompt(console, "Slot cookie name",
+                            defaultSlotCookie != null ? defaultSlotCookie : "X-Slot");
+                    String drainTimeoutStr = prompt(console, "Drain timeout (seconds)",
+                            defaultDrainTimeout != null ? defaultDrainTimeout : "300");
+                    drainTimeout = Integer.parseInt(drainTimeoutStr);
+                    managementPort = prompt(console, "Management port (blank = app port)",
+                            defaultManagementPort != null ? defaultManagementPort : "8090");
+                    notifyPath = prompt(console, "Notify path",
+                            defaultNotifyPath != null ? defaultNotifyPath : "/actuator/new-version");
+                    activeUsersPath = prompt(console, "Active users path",
+                            defaultActiveUsersPath != null ? defaultActiveUsersPath : "/actuator/active-users");
+                }
             }
+        } else {
+            blueGreen = false;
+            gracefulDrain = false;
         }
 
         String firewallStr = prompt(console, "Configure firewall with ufw (yes/no)",
                 defaultFirewall != null ? defaultFirewall : "yes");
         boolean firewall = "yes".equalsIgnoreCase(firewallStr);
         boolean exposeNodes = false;
-        if (firewall) {
+        if (firewall && webService) {
             String exposeNodesStr = prompt(console, "Expose app server ports 8080/8081 for direct access (yes/no)",
                     defaultExposeNodes != null ? defaultExposeNodes : "no");
             exposeNodes = "yes".equalsIgnoreCase(exposeNodesStr);
@@ -711,7 +740,8 @@ public class Deploy {
                 + "NOTIFY_PATH=" + notifyPath + "\n"
                 + "ACTIVE_USERS_PATH=" + activeUsersPath + "\n"
                 + "FIREWALL=" + (firewall ? "yes" : "no") + "\n"
-                + "EXPOSE_NODES=" + (exposeNodes ? "yes" : "no") + "\n");
+                + "EXPOSE_NODES=" + (exposeNodes ? "yes" : "no") + "\n"
+                + "WEB_SERVICE=" + (webService ? "yes" : "no") + "\n");
         System.out.println("Wrote vmhosting.conf");
 
         // Resolve the private key path for SSH connections (strip .pub if present)
@@ -736,7 +766,8 @@ public class Deploy {
                 + " " + proxy + " " + appType + " " + (blueGreen ? "yes" : "no")
                 + " " + (managementPort != null && !managementPort.isBlank() ? managementPort : "0")
                 + " " + (firewall ? "yes" : "no")
-                + " " + (exposeNodes ? "yes" : "no"));
+                + " " + (exposeNodes ? "yes" : "no")
+                + " " + (webService ? "yes" : "no"));
 
         Files.delete(tempScript);
 
@@ -778,22 +809,24 @@ public class Deploy {
         boolean pom = Files.exists(Path.of("pom.xml"));
         boolean gradle = Files.exists(Path.of("build.gradle")) || Files.exists(Path.of("build.gradle.kts"));
         boolean quarkus = "quarkus".equals(appType);
+        boolean plain = "plain".equals(appType);
+        String gradleTask = quarkus ? "quarkusBuild" : (plain ? "build" : "bootJar");
 
         if (mavenw) {
             run("./mvnw", "-DskipTests", "package");
         } else if (gradlew) {
-            run("./gradlew", "-x", "test", quarkus ? "quarkusBuild" : "bootJar");
+            run("./gradlew", "-x", "test", gradleTask);
         } else if (pom) {
             run("mvn", "-DskipTests", "package");
         } else if (gradle) {
-            run("gradle", "-x", "test", quarkus ? "quarkusBuild" : "bootJar");
+            run("gradle", "-x", "test", gradleTask);
         } else {
             System.err.println("No Maven or Gradle project found in current directory");
             System.exit(1);
         }
 
         if (blueGreen) {
-            deployBlueGreen(quarkus, mavenw, pom);
+            deployBlueGreen(quarkus, plain, mavenw, pom);
             return;
         }
 
@@ -807,6 +840,12 @@ public class Deploy {
             run("rsync", "-az", "--delete", "--stats",
                     "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
                     syncSource,
+                    user + "@" + host + ":/home/" + user + "/app/");
+        } else if (plain) {
+            Path staging = stagePlainJar(mavenw, pom);
+            run("rsync", "-az", "--delete", "--stats",
+                    "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
+                    staging + "/",
                     user + "@" + host + ":/home/" + user + "/app/");
         } else {
             // Spring Boot: extract fat jar for efficient rsync (lib/ changes rarely)
@@ -845,7 +884,7 @@ public class Deploy {
     // -----------------------------------------------------------------------
     // deployBlueGreen – zero-downtime blue/green deploy
     // -----------------------------------------------------------------------
-    static void deployBlueGreen(boolean quarkus, boolean mavenw, boolean pom) throws Exception {
+    static void deployBlueGreen(boolean quarkus, boolean plain, boolean mavenw, boolean pom) throws Exception {
         // Read the current active slot to determine where to rsync
         System.out.println("Reading active slot ...");
         String activeRaw = sshOutputAsRoot("cat /home/" + user + "/active 2>/dev/null || echo blue").trim();
@@ -863,6 +902,12 @@ public class Deploy {
             run("rsync", "-az", "--delete", "--stats",
                     "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
                     "target/quarkus-app",
+                    remoteDir);
+        } else if (plain) {
+            Path staging = stagePlainJar(mavenw, pom);
+            run("rsync", "-az", "--delete", "--stats",
+                    "-e", "ssh -i " + sshKey + " -o StrictHostKeyChecking=accept-new",
+                    staging + "/",
                     remoteDir);
         } else {
             Path jarDir = (mavenw || pom) ? Path.of("target") : Path.of("build", "libs");
@@ -1163,16 +1208,35 @@ public class Deploy {
 
     static String detectAppType() {
         try {
+            boolean hasBuildFile = false;
+            boolean mentionsSpringBoot = false;
             for (String buildFile : List.of("pom.xml", "build.gradle", "build.gradle.kts")) {
                 Path path = Path.of(buildFile);
-                if (Files.exists(path) && Files.readString(path).contains("quarkus")) {
-                    return "quarkus";
-                }
+                if (!Files.exists(path)) continue;
+                hasBuildFile = true;
+                String content = Files.readString(path);
+                if (content.contains("quarkus")) return "quarkus";
+                if (content.contains("spring-boot")) mentionsSpringBoot = true;
             }
+            if (hasBuildFile && !mentionsSpringBoot) return "plain";
         } catch (IOException e) {
             // fall through to default
         }
         return "spring-boot";
+    }
+
+    /** Stage the built fat jar as $user.jar in a clean dir suitable for rsync --delete. */
+    static Path stagePlainJar(boolean mavenw, boolean pom) throws IOException {
+        Path jarDir = (mavenw || pom) ? Path.of("target") : Path.of("build", "libs");
+        Path jar = findJar(jarDir);
+        System.out.println("Found jar: " + jar);
+        Path staging = jar.getParent().resolve("plain-staging");
+        if (Files.exists(staging)) {
+            deleteRecursively(staging);
+        }
+        Files.createDirectories(staging);
+        Files.copy(jar, staging.resolve(user + ".jar"));
+        return staging;
     }
 
     static Path findJar(Path dir) throws IOException {
@@ -1180,6 +1244,7 @@ public class Deploy {
             return files
                     .filter(p -> p.toString().endsWith(".jar"))
                     .filter(p -> !p.toString().endsWith("-plain.jar"))
+                    .filter(p -> !p.getFileName().toString().startsWith("original-"))
                     .findFirst()
                     .orElseThrow(() -> new RuntimeException("No jar found in " + dir));
         }
