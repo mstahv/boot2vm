@@ -67,7 +67,7 @@ public class Deploy {
             echo "--- Installing JDK 25 (provider: $JDK_PROVIDER) ---"
             if [ "$JDK_PROVIDER" = "zulu" ]; then
                 apt-get install -y gnupg ca-certificates curl
-                curl -s https://repos.azul.com/azul-repo.key | gpg --dearmor -o /usr/share/keyrings/azul.gpg
+                curl -fsSL https://repos.azul.com/azul-repo.key | gpg --dearmor -o /usr/share/keyrings/azul.gpg
                 chmod 644 /usr/share/keyrings/azul.gpg
                 echo "deb [signed-by=/usr/share/keyrings/azul.gpg] https://repos.azul.com/zulu/deb stable main" \\
                     > /etc/apt/sources.list.d/zulu.list
