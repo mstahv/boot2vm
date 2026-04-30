@@ -64,24 +64,32 @@ public class Deploy {
             systemctl enable --now unattended-upgrades
 
             # 2. Install JDK 25 (Eclipse Adoptium / Temurin or Azul Zulu)
+            JDK_PROVIDER="$(printf '%s' "$JDK_PROVIDER" | tr '[:upper:]' '[:lower:]')"
             echo "--- Installing JDK 25 (provider: $JDK_PROVIDER) ---"
-            if [ "$JDK_PROVIDER" = "zulu" ]; then
-                apt-get install -y gnupg ca-certificates curl
-                curl -fsSL https://repos.azul.com/azul-repo.key | gpg --dearmor -o /usr/share/keyrings/azul.gpg
-                chmod 644 /usr/share/keyrings/azul.gpg
-                echo "deb [signed-by=/usr/share/keyrings/azul.gpg] https://repos.azul.com/zulu/deb stable main" \\
-                    > /etc/apt/sources.list.d/zulu.list
-                apt-get update
-                apt-get install -y zulu25-jdk
-            else
-                apt-get install -y wget apt-transport-https gpg
-                wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
-                    | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
-                echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \\
-                    > /etc/apt/sources.list.d/adoptium.list
-                apt-get update
-                apt-get install -y temurin-25-jdk
-            fi
+            case "$JDK_PROVIDER" in
+                zulu)
+                    apt-get install -y gnupg ca-certificates curl
+                    curl -s https://repos.azul.com/azul-repo.key | gpg --dearmor -o /usr/share/keyrings/azul.gpg
+                    chmod 644 /usr/share/keyrings/azul.gpg
+                    echo "deb [signed-by=/usr/share/keyrings/azul.gpg] https://repos.azul.com/zulu/deb stable main" \\
+                        > /etc/apt/sources.list.d/zulu.list
+                    apt-get update
+                    apt-get install -y zulu25-jdk
+                    ;;
+                temurin)
+                    apt-get install -y wget apt-transport-https gpg
+                    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
+                        | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
+                    echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \\
+                        > /etc/apt/sources.list.d/adoptium.list
+                    apt-get update
+                    apt-get install -y temurin-25-jdk
+                    ;;
+                *)
+                    echo "Unsupported JDK_PROVIDER: '$JDK_PROVIDER'. Supported values are: temurin, zulu." >&2
+                    exit 1
+                    ;;
+            esac
 
             # 3. Create application user and set up SSH access
             echo "--- Creating user '$APP_USER' ---"
