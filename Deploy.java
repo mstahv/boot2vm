@@ -8,7 +8,7 @@ import java.util.*;
 
 public class Deploy {
 
-    static String host, user, domain, sshKey, adminUser, proxy, appType;
+    static String host, user, domain, sshKey, adminUser, proxy, appType, jdkProvider;
     static boolean https, blueGreen;
     static boolean gracefulDrain;
     static boolean webService = true;
@@ -29,6 +29,7 @@ public class Deploy {
             FIREWALL="${9:-yes}"
             EXPOSE_NODES="${10:-no}"
             WEB_SERVICE="${11:-yes}"
+            JDK_PROVIDER="${12:-temurin}"  # temurin or zulu
 
             # Build Caddy site address (supports multiple domains)
             if [ "$HTTPS" = "yes" ]; then
@@ -62,15 +63,33 @@ public class Deploy {
             CONF
             systemctl enable --now unattended-upgrades
 
-            # 2. Install JDK 25 (Eclipse Adoptium / Temurin)
-            echo "--- Installing JDK 25 ---"
-            apt-get install -y wget apt-transport-https gpg
-            wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
-                | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
-            echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \\
-                > /etc/apt/sources.list.d/adoptium.list
-            apt-get update
-            apt-get install -y temurin-25-jdk
+            # 2. Install JDK 25 (Eclipse Adoptium / Temurin or Azul Zulu)
+            JDK_PROVIDER="$(printf '%s' "$JDK_PROVIDER" | tr '[:upper:]' '[:lower:]')"
+            echo "--- Installing JDK 25 (provider: $JDK_PROVIDER) ---"
+            case "$JDK_PROVIDER" in
+                zulu)
+                    apt-get install -y gnupg ca-certificates curl
+                    curl -s https://repos.azul.com/azul-repo.key | gpg --dearmor -o /usr/share/keyrings/azul.gpg
+                    chmod 644 /usr/share/keyrings/azul.gpg
+                    echo "deb [signed-by=/usr/share/keyrings/azul.gpg] https://repos.azul.com/zulu/deb stable main" \\
+                        > /etc/apt/sources.list.d/zulu.list
+                    apt-get update
+                    apt-get install -y zulu25-jdk
+                    ;;
+                temurin)
+                    apt-get install -y wget apt-transport-https gpg
+                    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
+                        | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
+                    echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \\
+                        > /etc/apt/sources.list.d/adoptium.list
+                    apt-get update
+                    apt-get install -y temurin-25-jdk
+                    ;;
+                *)
+                    echo "Unsupported JDK_PROVIDER: '$JDK_PROVIDER'. Supported values are: temurin, zulu." >&2
+                    exit 1
+                    ;;
+            esac
 
             # 3. Create application user and set up SSH access
             echo "--- Creating user '$APP_USER' ---"
@@ -567,6 +586,7 @@ public class Deploy {
         proxy = props.getProperty("PROXY", "caddy");
         webService = !"no".equalsIgnoreCase(props.getProperty("WEB_SERVICE", "yes"));
         appType = props.getProperty("APP_TYPE", "spring-boot");
+        jdkProvider = props.getProperty("JDK_PROVIDER", "temurin");
         blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
         gracefulDrain = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN_GRACEFUL", "no"));
         slotCookie = props.getProperty("SLOT_COOKIE", "X-Slot");
@@ -602,10 +622,11 @@ public class Deploy {
         Path configPath = Path.of("vmhosting.conf");
         String defaultHost = null, defaultUser = null, defaultDomain = null,
                 defaultKey = null, defaultAdmin = null, defaultHttps = null,
-                defaultProxy = null, defaultAppType = null, defaultBlueGreen = null,
-                defaultGracefulDrain = null, defaultSlotCookie = null, defaultDrainTimeout = null,
-                defaultManagementPort = null, defaultNotifyPath = null, defaultActiveUsersPath = null,
-                defaultFirewall = null, defaultExposeNodes = null, defaultWebService = null;
+                defaultProxy = null, defaultAppType = null, defaultJdkProvider = null,
+                defaultBlueGreen = null, defaultGracefulDrain = null, defaultSlotCookie = null,
+                defaultDrainTimeout = null, defaultManagementPort = null, defaultNotifyPath = null,
+                defaultActiveUsersPath = null, defaultFirewall = null, defaultExposeNodes = null,
+                defaultWebService = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -619,6 +640,7 @@ public class Deploy {
             defaultHttps = props.getProperty("HTTPS");
             defaultProxy = props.getProperty("PROXY");
             defaultAppType = props.getProperty("APP_TYPE");
+            defaultJdkProvider = props.getProperty("JDK_PROVIDER");
             defaultBlueGreen = props.getProperty("BLUE_GREEN");
             defaultGracefulDrain = props.getProperty("BLUE_GREEN_GRACEFUL");
             defaultSlotCookie = props.getProperty("SLOT_COOKIE");
@@ -670,6 +692,8 @@ public class Deploy {
         }
         appType = prompt(console, "App type (spring-boot/quarkus/plain)",
                 defaultAppType != null ? defaultAppType : detectAppType());
+        jdkProvider = prompt(console, "JDK provider (temurin/zulu)",
+                defaultJdkProvider != null ? defaultJdkProvider : "temurin");
         if (webService) {
             String blueGreenStr = prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
                     defaultBlueGreen != null ? defaultBlueGreen : "no");
@@ -732,6 +756,7 @@ public class Deploy {
                 + "HTTPS=" + (https ? "yes" : "no") + "\n"
                 + "PROXY=" + proxy + "\n"
                 + "APP_TYPE=" + appType + "\n"
+                + "JDK_PROVIDER=" + jdkProvider + "\n"
                 + "BLUE_GREEN=" + (blueGreen ? "yes" : "no") + "\n"
                 + "BLUE_GREEN_GRACEFUL=" + (gracefulDrain ? "yes" : "no") + "\n"
                 + "SLOT_COOKIE=" + slotCookie + "\n"
@@ -767,7 +792,8 @@ public class Deploy {
                 + " " + (managementPort != null && !managementPort.isBlank() ? managementPort : "0")
                 + " " + (firewall ? "yes" : "no")
                 + " " + (exposeNodes ? "yes" : "no")
-                + " " + (webService ? "yes" : "no"));
+                + " " + (webService ? "yes" : "no")
+                + " " + jdkProvider);
 
         Files.delete(tempScript);
 
