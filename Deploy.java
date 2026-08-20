@@ -117,6 +117,20 @@ public class Deploy {
 
             # 5. Systemd service(s) for the application
             echo "--- Installing systemd service(s) ---"
+            # Behind a reverse proxy the app would otherwise see every connection as
+            # coming from localhost — tell the framework to trust X-Forwarded-* headers
+            # so real client IPs and the https scheme are visible to the app.
+            FWD_ENV_LINES=""
+            if [ "$WEB_SERVICE" = "yes" ] && [ "$PROXY" != "none" ]; then
+                case "$APP_TYPE" in
+                    spring-boot)
+                        FWD_ENV_LINES="Environment=SERVER_FORWARDED_HEADERS_STRATEGY=native"
+                        ;;
+                    quarkus)
+                        FWD_ENV_LINES=$'Environment=QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true\\nEnvironment=QUARKUS_HTTP_PROXY_ALLOW_X_FORWARDED=true'
+                        ;;
+                esac
+            fi
             if [ "$BLUE_GREEN" = "yes" ]; then
                 for SLOT in blue green; do
                     if [ "$SLOT" = "blue" ]; then SLOT_PORT=8080; else SLOT_PORT=8081; fi
@@ -147,6 +161,7 @@ public class Deploy {
             Environment=QUARKUS_HTTP_PORT=$SLOT_PORT
             Environment=APP_SLOT=$SLOT
             $MGMT_ENV_LINE
+            $FWD_ENV_LINES
             EnvironmentFile=-/home/$APP_USER/.env
             ExecStart=$EXEC_START
             Restart=on-failure
@@ -173,6 +188,7 @@ public class Deploy {
             Type=simple
             User=$APP_USER
             WorkingDirectory=/home/$APP_USER/app
+            $FWD_ENV_LINES
             EnvironmentFile=-/home/$APP_USER/.env
             ExecStart=$EXEC_START
             Restart=on-failure

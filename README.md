@@ -83,7 +83,7 @@ Only the host is required — sensible defaults are derived for the rest. Multip
  3. Creates the app user with SSH authorized key copied from the admin user
  4. Creates the working directory `/home/$USER/app`
  5. Installs a **systemd service** that runs the app on boot and restarts on failure
- 6. Installs **Caddy** as a reverse proxy with automatic HTTPS
+ 6. Installs **Caddy** as a reverse proxy with automatic HTTPS, and configures the app (Spring Boot or Quarkus) to trust the proxy's `X-Forwarded-*` headers so it sees real client IPs and the `https` scheme instead of `localhost` connections
 
 ### `Deploy deploy` (default)
 
