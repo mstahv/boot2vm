@@ -18,8 +18,7 @@ While the name says "VM", the tool is not technically tied to virtual machines o
 
 ### Cons
 
- * No container isolation — slightly reduced security boundary, though this setup assumes a dedicated VM per service anyway.
- * One server per service.
+ * No container isolation — slightly reduced security boundary; apps on a shared server are separated only by Linux users.
  * No horizontal scaling.
  * No versioned rollback — there is no previous image to revert to; rolling back requires rebuilding an older artifact from source.
  * No resource limits — unlike containers, there is no built-in CPU or memory cap per service; a runaway process can starve the whole machine.
@@ -67,7 +66,7 @@ Deploy add-key ~/.ssh/colleague_id_rsa.pub
 Interactive one-time setup. Prompts for connection details, writes a `vmhosting.conf` in the current directory, then provisions the server:
 
 ```
-Host: myapp.example.com
+Host (SSH address, a single hostname or IP): myapp.example.com
 App user [myapp]:
 Does this service expose web endpoints (yes/no) [yes]:
 Domain(s) (comma-separated for multiple) [myapp.example.com]:
@@ -137,6 +136,7 @@ APP_TYPE=spring-boot
  * `ADMIN_USER` – SSH user for server admin commands (uses sudo if not root)
  * `PROXY` – Reverse proxy to install: `caddy` (default) or `none`
  * `APP_TYPE` – Application type: `spring-boot` (default), `quarkus`, or `plain` (runnable fat jar — auto-detected from build files; `original-*.jar` and `*-plain.jar` are ignored when locating the artifact)
+ * `PORT` – Port the app listens on (default `8080`; injected as `SERVER_PORT`/`QUARKUS_HTTP_PORT`). Must be unique per app when hosting multiple apps on the same server. With blue-green, the green slot uses `PORT+1`.
 jbang app install https://github.com/mstahv/boot2vm/blob/main/Deploy.java
 
 # Scaffold a new Vaadin + Spring Boot app
@@ -154,6 +154,18 @@ Deploy init       # enter: somehost.somewhere.com (then Enter through the defaul
                   # ... builds, syncs, starts — open https://somehost.somewhere.com
 Deploy logs       # watch it run
 ```
+
+## Multiple apps on the same server
+
+Several independent apps can share one server. Each app is isolated by its own Linux user, systemd service(s), and Caddy site config, so run `Deploy init` from each project directory against the same host with:
+
+ * a unique **app user** (defines the service name and home directory)
+ * a unique **port** (`PORT`; with blue-green the app also reserves `PORT+1`, and `MANAGEMENT_PORT`/`MANAGEMENT_PORT+1` if set)
+ * its own **domain(s)** — or the same domain with an explicit port in the site address (e.g. `example.com:8443`), which Caddy serves with HTTPS on that port; the firewall opens custom site ports automatically
+
+Caddy routes requests to the right app by domain (or site port). Each app owns `/etc/caddy/sites/<user>.caddy` and the main Caddyfile just imports them, so deploys and `Deploy clean` of one app never touch the others. Re-running `init` for an additional app is safe: package installations are idempotent and firewall rules are added without resetting existing ones.
+
+Servers set up with an older version of this tool are migrated to the import-based Caddy layout automatically on the next `init` or blue-green deploy.
 
 ## Graceful drain mode
 

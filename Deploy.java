@@ -12,6 +12,7 @@ public class Deploy {
     static boolean https, blueGreen;
     static boolean gracefulDrain;
     static boolean webService = true;
+    static int port = 8080;
     static String slotCookie = "X-Slot", managementPort = "", notifyPath = "/actuator/new-version", activeUsersPath = "/actuator/active-users";
     static int drainTimeout = 300;
 
@@ -30,6 +31,7 @@ public class Deploy {
             EXPOSE_NODES="${10:-no}"
             WEB_SERVICE="${11:-yes}"
             JDK_PROVIDER="${12:-temurin}"  # temurin or zulu
+            PORT="${13:-8080}"             # app port; blue-green green slot uses PORT+1
 
             # Build Caddy site address (supports multiple domains)
             if [ "$HTTPS" = "yes" ]; then
@@ -133,7 +135,7 @@ public class Deploy {
             fi
             if [ "$BLUE_GREEN" = "yes" ]; then
                 for SLOT in blue green; do
-                    if [ "$SLOT" = "blue" ]; then SLOT_PORT=8080; else SLOT_PORT=8081; fi
+                    if [ "$SLOT" = "blue" ]; then SLOT_PORT=$PORT; else SLOT_PORT=$((PORT + 1)); fi
                     if [ "$MANAGEMENT_PORT_BLUE" != "0" ]; then
                         if [ "$SLOT" = "blue" ]; then
                             MGMT_ENV_LINE="Environment=MANAGEMENT_SERVER_PORT=$MANAGEMENT_PORT_BLUE"
@@ -179,6 +181,10 @@ public class Deploy {
                 else
                     EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/$APP_USER.jar"
                 fi
+                PORT_ENV_LINES=""
+                if [ "$WEB_SERVICE" = "yes" ]; then
+                    PORT_ENV_LINES=$'Environment=SERVER_PORT='"$PORT"$'\\nEnvironment=QUARKUS_HTTP_PORT='"$PORT"
+                fi
                 cat > "/etc/systemd/system/$APP_USER.service" << UNIT
             [Unit]
             Description=Java Application ($APP_USER)
@@ -188,6 +194,7 @@ public class Deploy {
             Type=simple
             User=$APP_USER
             WorkingDirectory=/home/$APP_USER/app
+            $PORT_ENV_LINES
             $FWD_ENV_LINES
             EnvironmentFile=-/home/$APP_USER/.env
             ExecStart=$EXEC_START
@@ -213,9 +220,15 @@ public class Deploy {
                     > /etc/apt/sources.list.d/caddy-stable.list
                 apt-get update
                 apt-get install -y caddy
-                cat > /etc/caddy/Caddyfile << CADDY
+                # Per-app site files allow multiple apps behind the same Caddy instance.
+                # The main Caddyfile only imports them; each app owns /etc/caddy/sites/<user>.caddy.
+                mkdir -p /etc/caddy/sites
+                if ! grep -qF 'import /etc/caddy/sites' /etc/caddy/Caddyfile 2>/dev/null; then
+                    echo 'import /etc/caddy/sites/*.caddy' > /etc/caddy/Caddyfile
+                fi
+                cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
-                reverse_proxy localhost:8080
+                reverse_proxy localhost:$PORT
             }
             CADDY
                 systemctl reload caddy
@@ -227,23 +240,33 @@ public class Deploy {
             if [ "$FIREWALL" = "yes" ]; then
                 echo "--- Configuring firewall (ufw) ---"
                 apt-get install -y ufw
-                ufw --force reset
+                # No 'ufw reset' here — rules are added idempotently so that
+                # setting up a second app on the same server keeps existing rules.
                 ufw default deny incoming
                 ufw default allow outgoing
                 ufw allow ssh
                 if [ "$WEB_SERVICE" = "yes" ]; then
                     ufw allow 80/tcp
                     ufw allow 443/tcp
+                    # Open any custom ports used in site addresses (e.g. example.com:8443)
+                    for d in $DOMAIN; do
+                        hp="${d#*://}"
+                        case "$hp" in
+                            *:*) ufw allow "${hp##*:}/tcp" ;;
+                        esac
+                    done
                     if [ "$EXPOSE_NODES" = "yes" ]; then
-                        ufw allow 8080/tcp
-                        ufw allow 8081/tcp
+                        ufw allow "$PORT/tcp"
+                        if [ "$BLUE_GREEN" = "yes" ]; then
+                            ufw allow "$((PORT + 1))/tcp"
+                        fi
                     fi
                 fi
                 ufw --force enable
                 if [ "$WEB_SERVICE" != "yes" ]; then
                     echo "Firewall enabled: SSH allowed inbound; all else blocked (non-web service)"
                 elif [ "$EXPOSE_NODES" = "yes" ]; then
-                    echo "Firewall enabled: SSH, 80/tcp, 443/tcp, 8080/tcp, 8081/tcp allowed inbound"
+                    echo "Firewall enabled: SSH, 80/tcp, 443/tcp and app port(s) allowed inbound"
                 else
                     echo "Firewall enabled: SSH, 80/tcp, 443/tcp allowed inbound; all else blocked"
                 fi
@@ -262,6 +285,7 @@ public class Deploy {
             HTTPS="${3:-yes}"
             DOMAIN="$4"
             MANAGEMENT_PORT_BLUE="${5:-0}"
+            PORT="${6:-8080}"
 
             # Build Caddy site address (supports multiple domains)
             if [ "$HTTPS" = "yes" ]; then
@@ -286,12 +310,12 @@ public class Deploy {
             ACTIVE=$(cat "$ACTIVE_FILE" 2>/dev/null || echo blue)
             if [ "$ACTIVE" = "blue" ]; then
                 INACTIVE="green"
-                ACTIVE_PORT=8080
-                INACTIVE_PORT=8081
+                ACTIVE_PORT=$PORT
+                INACTIVE_PORT=$((PORT + 1))
             else
                 INACTIVE="blue"
-                ACTIVE_PORT=8081
-                INACTIVE_PORT=8080
+                ACTIVE_PORT=$((PORT + 1))
+                INACTIVE_PORT=$PORT
             fi
 
             # Resolve management port for the new (inactive) slot
@@ -349,7 +373,12 @@ public class Deploy {
             # Swap traffic at the reverse proxy
             if [ "$PROXY" = "caddy" ]; then
                 echo "--- Swapping Caddy to $INACTIVE_LABEL ---"
-                cat > /etc/caddy/Caddyfile << CADDY
+                mkdir -p /etc/caddy/sites
+                # Migrate legacy single-app Caddyfile to the import-based layout
+                if ! grep -qF 'import /etc/caddy/sites' /etc/caddy/Caddyfile 2>/dev/null; then
+                    echo 'import /etc/caddy/sites/*.caddy' > /etc/caddy/Caddyfile
+                fi
+                cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
                 reverse_proxy localhost:$INACTIVE_PORT
             }
@@ -381,6 +410,7 @@ public class Deploy {
             NOTIFY_PATH="${7:-/actuator/new-version}"
             ACTIVE_USERS_PATH="${8:-/actuator/active-users}"
             MANAGEMENT_PORT_BLUE="${9:-0}"
+            PORT="${10:-8080}"
 
             # Build Caddy site address (supports multiple domains)
             if [ "$HTTPS" = "yes" ]; then
@@ -405,12 +435,12 @@ public class Deploy {
             ACTIVE=$(cat "$ACTIVE_FILE" 2>/dev/null || echo blue)
             if [ "$ACTIVE" = "blue" ]; then
                 INACTIVE="green"
-                INACTIVE_PORT=8081
-                ACTIVE_PORT=8080
+                INACTIVE_PORT=$((PORT + 1))
+                ACTIVE_PORT=$PORT
             else
                 INACTIVE="blue"
-                INACTIVE_PORT=8080
-                ACTIVE_PORT=8081
+                INACTIVE_PORT=$PORT
+                ACTIVE_PORT=$((PORT + 1))
             fi
 
             # Resolve management ports (Spring Boot management.server.port) for each slot
@@ -471,8 +501,13 @@ public class Deploy {
 
             # Write split-traffic Caddyfile (cookie-pinned users stay on old slot)
             if [ "$PROXY" = "caddy" ]; then
-                echo "--- Writing drain-mode Caddyfile (old=$ACTIVE_LABEL new=$INACTIVE_LABEL, cookie $SLOT_COOKIE=$ACTIVE) ---"
-                cat > /etc/caddy/Caddyfile << CADDY
+                echo "--- Writing drain-mode Caddy site config (old=$ACTIVE_LABEL new=$INACTIVE_LABEL, cookie $SLOT_COOKIE=$ACTIVE) ---"
+                mkdir -p /etc/caddy/sites
+                # Migrate legacy single-app Caddyfile to the import-based layout
+                if ! grep -qF 'import /etc/caddy/sites' /etc/caddy/Caddyfile 2>/dev/null; then
+                    echo 'import /etc/caddy/sites/*.caddy' > /etc/caddy/Caddyfile
+                fi
+                cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
                 @old_slot {
                     header Cookie *$SLOT_COOKIE=$ACTIVE*
@@ -529,7 +564,7 @@ public class Deploy {
             # Switch Caddy to serve only the new backend
             if [ "$PROXY" = "caddy" ]; then
                 echo "--- Switching Caddy to $INACTIVE_LABEL only ---"
-                cat > /etc/caddy/Caddyfile << CADDY
+                cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
                 reverse_proxy localhost:$INACTIVE_PORT
             }
@@ -595,7 +630,11 @@ public class Deploy {
         }
         host = props.getProperty("HOST");
         user = props.getProperty("USER");
+        // Accept comma-separated domains in hand-edited configs too — the scripts expect space-separated
         domain = props.getProperty("DOMAIN", host);
+        if (domain != null) {
+            domain = domain.replaceAll("\\s*,\\s*", " ").trim();
+        }
         sshKey = props.getProperty("SSH_KEY", "~/.ssh/id_rsa.pub");
         adminUser = props.getProperty("ADMIN_USER", "root");
         https = !"no".equalsIgnoreCase(props.getProperty("HTTPS", "yes"));
@@ -603,6 +642,7 @@ public class Deploy {
         webService = !"no".equalsIgnoreCase(props.getProperty("WEB_SERVICE", "yes"));
         appType = props.getProperty("APP_TYPE", "spring-boot");
         jdkProvider = props.getProperty("JDK_PROVIDER", "temurin");
+        port = Integer.parseInt(props.getProperty("PORT", "8080"));
         blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
         gracefulDrain = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN_GRACEFUL", "no"));
         slotCookie = props.getProperty("SLOT_COOKIE", "X-Slot");
@@ -620,6 +660,11 @@ public class Deploy {
 
         if (host == null || user == null) {
             System.err.println("HOST and USER must be set in vmhosting.conf");
+            System.exit(1);
+        }
+        if (host.contains(",") || host.matches(".*\\s.*")) {
+            System.err.println("HOST in vmhosting.conf must be a single hostname or IP (got: '" + host
+                    + "'). Put additional domains in DOMAIN instead.");
             System.exit(1);
         }
     }
@@ -642,7 +687,7 @@ public class Deploy {
                 defaultBlueGreen = null, defaultGracefulDrain = null, defaultSlotCookie = null,
                 defaultDrainTimeout = null, defaultManagementPort = null, defaultNotifyPath = null,
                 defaultActiveUsersPath = null, defaultFirewall = null, defaultExposeNodes = null,
-                defaultWebService = null;
+                defaultWebService = null, defaultPort = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -667,13 +712,21 @@ public class Deploy {
             defaultFirewall = props.getProperty("FIREWALL");
             defaultExposeNodes = props.getProperty("EXPOSE_NODES");
             defaultWebService = props.getProperty("WEB_SERVICE");
+            defaultPort = props.getProperty("PORT");
         }
 
-        // HOST (required)
-        host = prompt(console, "Host", defaultHost);
-        if (host.isBlank()) {
-            System.err.println("Host is required");
-            System.exit(1);
+        // HOST (required, single hostname — extra domains are asked separately)
+        while (true) {
+            host = prompt(console, "Host (SSH address, a single hostname or IP)", defaultHost);
+            if (host.isBlank()) {
+                System.err.println("Host is required");
+                System.exit(1);
+            }
+            if (host.contains(",") || host.matches(".*\\s.*")) {
+                System.err.println("  Host must be a single hostname or IP — additional domains are entered at the 'Domain(s)' prompt below.");
+                continue;
+            }
+            break;
         }
 
         // Derive smart defaults from host
@@ -702,6 +755,9 @@ public class Deploy {
             https = httpsStr.equalsIgnoreCase("yes");
             proxy = prompt(console, "Reverse proxy (caddy/none)",
                     defaultProxy != null ? defaultProxy : "caddy");
+            String portStr = prompt(console, "App port (must be unique per app on the server; blue-green also uses port+1)",
+                    defaultPort != null ? defaultPort : "8080");
+            port = Integer.parseInt(portStr);
         } else {
             https = false;
             proxy = "none";
@@ -743,7 +799,8 @@ public class Deploy {
         boolean firewall = "yes".equalsIgnoreCase(firewallStr);
         boolean exposeNodes = false;
         if (firewall && webService) {
-            String exposeNodesStr = prompt(console, "Expose app server ports 8080/8081 for direct access (yes/no)",
+            String exposePortsLabel = blueGreen ? port + "/" + (port + 1) : String.valueOf(port);
+            String exposeNodesStr = prompt(console, "Expose app server port(s) " + exposePortsLabel + " for direct access (yes/no)",
                     defaultExposeNodes != null ? defaultExposeNodes : "no");
             exposeNodes = "yes".equalsIgnoreCase(exposeNodesStr);
         }
@@ -773,6 +830,7 @@ public class Deploy {
                 + "PROXY=" + proxy + "\n"
                 + "APP_TYPE=" + appType + "\n"
                 + "JDK_PROVIDER=" + jdkProvider + "\n"
+                + "PORT=" + port + "\n"
                 + "BLUE_GREEN=" + (blueGreen ? "yes" : "no") + "\n"
                 + "BLUE_GREEN_GRACEFUL=" + (gracefulDrain ? "yes" : "no") + "\n"
                 + "SLOT_COOKIE=" + slotCookie + "\n"
@@ -809,7 +867,8 @@ public class Deploy {
                 + " " + (firewall ? "yes" : "no")
                 + " " + (exposeNodes ? "yes" : "no")
                 + " " + (webService ? "yes" : "no")
-                + " " + jdkProvider);
+                + " " + jdkProvider
+                + " " + port);
 
         Files.delete(tempScript);
 
@@ -985,7 +1044,7 @@ public class Deploy {
             Files.delete(tempScript);
             sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
                     + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
-                    + " " + mgmtPortBlue);
+                    + " " + mgmtPortBlue + " " + port);
         } else {
             System.out.println("Running blue-green swap ...");
             Path tempScript = Files.createTempFile("bg-swap", ".sh");
@@ -993,7 +1052,7 @@ public class Deploy {
             scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
             Files.delete(tempScript);
             sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
-                    + " " + mgmtPortBlue);
+                    + " " + mgmtPortBlue + " " + port);
         }
 
         System.out.println("Deployed successfully! Active slot is now: " + inactive);
@@ -1110,9 +1169,9 @@ public class Deploy {
             fi
             systemctl daemon-reload
 
-            if [ "$PROXY" = "caddy" ] && [ -f /etc/caddy/Caddyfile ]; then
-                echo "--- Resetting Caddy config ---"
-                echo '# empty' > /etc/caddy/Caddyfile
+            if [ "$PROXY" = "caddy" ]; then
+                echo "--- Removing Caddy site config for $APP_USER ---"
+                rm -f "/etc/caddy/sites/$APP_USER.caddy"
                 systemctl reload caddy 2>/dev/null || true
             fi
 
@@ -1227,14 +1286,14 @@ public class Deploy {
                 Files.delete(tempScript);
                 sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
                         + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
-                        + " " + mgmtPortBlue);
+                        + " " + mgmtPortBlue + " " + port);
             } else {
                 Path tempScript = Files.createTempFile("bg-swap", ".sh");
                 Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
                 scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
                 Files.delete(tempScript);
                 sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
-                        + " " + mgmtPortBlue);
+                        + " " + mgmtPortBlue + " " + port);
             }
             System.out.println("Service restarted (blue-green swap complete).");
         } else {
