@@ -9,7 +9,8 @@ import java.util.*;
 public class Deploy {
 
     static String host, user, domain, sshKey, adminUser, proxy, appType, jdkProvider;
-    static boolean https, blueGreen;
+    static String httpsMode = "yes";
+    static boolean blueGreen;
     static boolean gracefulDrain;
     static boolean webService = true;
     static int port = 8080;
@@ -34,7 +35,9 @@ public class Deploy {
             PORT="${13:-8080}"             # app port; blue-green green slot uses PORT+1
 
             # Build Caddy site address (supports multiple domains)
-            if [ "$HTTPS" = "yes" ]; then
+            TLS_DIRECTIVE=""
+            if [ "$HTTPS" = "internal" ]; then TLS_DIRECTIVE="tls internal"; fi
+            if [ "$HTTPS" != "no" ]; then
                 SITE_ADDR="$DOMAIN"
             else
                 SITE_ADDR=""
@@ -228,6 +231,7 @@ public class Deploy {
                 fi
                 cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
+                $TLS_DIRECTIVE
                 reverse_proxy localhost:$PORT
             }
             CADDY
@@ -288,7 +292,9 @@ public class Deploy {
             PORT="${6:-8080}"
 
             # Build Caddy site address (supports multiple domains)
-            if [ "$HTTPS" = "yes" ]; then
+            TLS_DIRECTIVE=""
+            if [ "$HTTPS" = "internal" ]; then TLS_DIRECTIVE="tls internal"; fi
+            if [ "$HTTPS" != "no" ]; then
                 SITE_ADDR="$DOMAIN"
             else
                 SITE_ADDR=""
@@ -380,6 +386,7 @@ public class Deploy {
                 fi
                 cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
+                $TLS_DIRECTIVE
                 reverse_proxy localhost:$INACTIVE_PORT
             }
             CADDY
@@ -413,7 +420,9 @@ public class Deploy {
             PORT="${10:-8080}"
 
             # Build Caddy site address (supports multiple domains)
-            if [ "$HTTPS" = "yes" ]; then
+            TLS_DIRECTIVE=""
+            if [ "$HTTPS" = "internal" ]; then TLS_DIRECTIVE="tls internal"; fi
+            if [ "$HTTPS" != "no" ]; then
                 SITE_ADDR="$DOMAIN"
             else
                 SITE_ADDR=""
@@ -509,6 +518,7 @@ public class Deploy {
                 fi
                 cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
+                $TLS_DIRECTIVE
                 @old_slot {
                     header Cookie *$SLOT_COOKIE=$ACTIVE*
                 }
@@ -566,6 +576,7 @@ public class Deploy {
                 echo "--- Switching Caddy to $INACTIVE_LABEL only ---"
                 cat > "/etc/caddy/sites/$APP_USER.caddy" << CADDY
             $SITE_ADDR {
+                $TLS_DIRECTIVE
                 reverse_proxy localhost:$INACTIVE_PORT
             }
             CADDY
@@ -594,6 +605,7 @@ public class Deploy {
             case "env" -> { loadConfig(); env(args); }
             case "add-key" -> { loadConfig(); addKey(args); }
             case "clean" -> { loadConfig(); clean(); }
+            case "root-cert" -> { loadConfig(); rootCert(args); }
             default -> {
                 System.err.println("Unknown command: " + command);
                 printUsage();
@@ -616,6 +628,55 @@ public class Deploy {
         System.out.println("  env list       - List environment variables on the server");
         System.out.println("  add-key [file] - Add an SSH public key to the server");
         System.out.println("  clean          - Remove the app, service, and user from the server");
+        System.out.println("  root-cert [file] - Export Caddy public root CA (default: caddy-root.crt)");
+    }
+
+    static String parseHttpsMode(String value) {
+        String mode = value.trim().toLowerCase(Locale.ROOT);
+        if (!Set.of("yes", "no", "internal").contains(mode)) {
+            throw new IllegalArgumentException("HTTPS must be yes, no or internal: " + value);
+        }
+        return mode;
+    }
+
+    static void validateHttpsMode() {
+        if ("internal".equals(httpsMode) && (!webService || !"caddy".equals(proxy))) {
+            throw new IllegalArgumentException("HTTPS=internal requires WEB_SERVICE=yes and PROXY=caddy");
+        }
+    }
+
+    /** Export only the public CA certificate, through authenticated SSH. */
+    static void rootCert(String[] args) throws Exception {
+        if (args.length > 2) throw new IllegalArgumentException("Usage: Deploy root-cert [file]");
+        if (!"internal".equals(httpsMode)) {
+            throw new IllegalArgumentException("root-cert requires HTTPS=internal; run init with that mode first");
+        }
+        Path output = Path.of(args.length == 2 ? args[1] : "caddy-root.crt");
+        if (Files.exists(output)) throw new FileAlreadyExistsException(output.toString());
+        // boot2vm installs the standard Debian Caddy systemd service/data directory.
+        String pem = sshOutputAsRoot("cat /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt");
+        writeRootCertificate(output, pem);
+        System.out.println("Install this public root certificate on each client device, then enable TLS trust.");
+        System.out.println("Keep Caddy's data directory: replacing its CA requires trusting the new root on all devices.");
+    }
+
+    static void writeRootCertificate(Path output, String pem) throws Exception {
+        var factory = java.security.cert.CertificateFactory.getInstance("X.509");
+        var cert = (java.security.cert.X509Certificate) factory.generateCertificate(
+                new ByteArrayInputStream(pem.getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        cert.checkValidity();
+        if (cert.getBasicConstraints() < 0) throw new IllegalArgumentException("Not a CA certificate");
+        cert.verify(cert.getPublicKey());
+        byte[] der = cert.getEncoded();
+        // Re-encode the parsed certificate so no other SSH output can enter the export.
+        String publicPem = "-----BEGIN CERTIFICATE-----\n"
+                + Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(der)
+                + "\n-----END CERTIFICATE-----\n";
+        Files.writeString(output, publicPem, StandardOpenOption.CREATE_NEW);
+        String fingerprint = HexFormat.ofDelimiter(":").withUpperCase().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(der));
+        System.out.println("Saved public root certificate to " + output);
+        System.out.println("SHA-256: " + fingerprint);
     }
 
     static void loadConfig() throws IOException {
@@ -637,9 +698,10 @@ public class Deploy {
         }
         sshKey = props.getProperty("SSH_KEY", "~/.ssh/id_rsa.pub");
         adminUser = props.getProperty("ADMIN_USER", "root");
-        https = !"no".equalsIgnoreCase(props.getProperty("HTTPS", "yes"));
+        httpsMode = parseHttpsMode(props.getProperty("HTTPS", "yes"));
         proxy = props.getProperty("PROXY", "caddy");
         webService = !"no".equalsIgnoreCase(props.getProperty("WEB_SERVICE", "yes"));
+        validateHttpsMode();
         appType = props.getProperty("APP_TYPE", "spring-boot");
         jdkProvider = props.getProperty("JDK_PROVIDER", "temurin");
         port = Integer.parseInt(props.getProperty("PORT", "8080"));
@@ -750,16 +812,16 @@ public class Deploy {
         adminUser = prompt(console, "Admin SSH user",
                 defaultAdmin != null ? defaultAdmin : "root");
         if (webService) {
-            String httpsStr = prompt(console, "HTTPS",
+            String httpsStr = prompt(console, "HTTPS (yes/no/internal)",
                     defaultHttps != null ? defaultHttps : "yes");
-            https = httpsStr.equalsIgnoreCase("yes");
+            httpsMode = parseHttpsMode(httpsStr);
             proxy = prompt(console, "Reverse proxy (caddy/none)",
                     defaultProxy != null ? defaultProxy : "caddy");
             String portStr = prompt(console, "App port (must be unique per app on the server; blue-green also uses port+1)",
                     defaultPort != null ? defaultPort : "8080");
             port = Integer.parseInt(portStr);
         } else {
-            https = false;
+            httpsMode = "no";
             proxy = "none";
         }
         appType = prompt(console, "App type (spring-boot/quarkus/plain)",
@@ -819,6 +881,8 @@ public class Deploy {
             envVars.add(entry);
         }
 
+        validateHttpsMode();
+
         // Write vmhosting.conf
         Files.writeString(configPath,
                 "HOST=" + host + "\n"
@@ -826,7 +890,7 @@ public class Deploy {
                 + "DOMAIN=" + domain + "\n"
                 + "SSH_KEY=" + sshKeyRaw + "\n"
                 + "ADMIN_USER=" + adminUser + "\n"
-                + "HTTPS=" + (https ? "yes" : "no") + "\n"
+                + "HTTPS=" + httpsMode + "\n"
                 + "PROXY=" + proxy + "\n"
                 + "APP_TYPE=" + appType + "\n"
                 + "JDK_PROVIDER=" + jdkProvider + "\n"
@@ -861,7 +925,7 @@ public class Deploy {
         scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/setup-server.sh");
         sshAsRoot("chmod +x /tmp/setup-server.sh");
         sshAsRoot("/tmp/setup-server.sh "
-                + user + " '" + domain + "' " + adminUser + " " + (https ? "yes" : "no")
+                + user + " '" + domain + "' " + adminUser + " " + httpsMode
                 + " " + proxy + " " + appType + " " + (blueGreen ? "yes" : "no")
                 + " " + (managementPort != null && !managementPort.isBlank() ? managementPort : "0")
                 + " " + (firewall ? "yes" : "no")
@@ -1042,7 +1106,7 @@ public class Deploy {
             Files.writeString(tempScript, BLUE_GREEN_GRACEFUL_SCRIPT);
             scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-graceful.sh");
             Files.delete(tempScript);
-            sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
+            sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + httpsMode + " '" + domain + "'"
                     + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
                     + " " + mgmtPortBlue + " " + port);
         } else {
@@ -1051,7 +1115,7 @@ public class Deploy {
             Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
             scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
             Files.delete(tempScript);
-            sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
+            sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + httpsMode + " '" + domain + "'"
                     + " " + mgmtPortBlue + " " + port);
         }
 
@@ -1284,7 +1348,7 @@ public class Deploy {
                 Files.writeString(tempScript, BLUE_GREEN_GRACEFUL_SCRIPT);
                 scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-graceful.sh");
                 Files.delete(tempScript);
-                sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
+                sshAsRootInteractive("bash /tmp/bg-graceful.sh " + user + " " + proxy + " " + httpsMode + " '" + domain + "'"
                         + " " + slotCookie + " " + drainTimeout + " " + notifyPath + " " + activeUsersPath
                         + " " + mgmtPortBlue + " " + port);
             } else {
@@ -1292,7 +1356,7 @@ public class Deploy {
                 Files.writeString(tempScript, BLUE_GREEN_SWAP_SCRIPT);
                 scp(tempScript.toString(), adminUser + "@" + host + ":/tmp/bg-swap.sh");
                 Files.delete(tempScript);
-                sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + (https ? "yes" : "no") + " '" + domain + "'"
+                sshAsRoot("bash /tmp/bg-swap.sh " + user + " " + proxy + " " + httpsMode + " '" + domain + "'"
                         + " " + mgmtPortBlue + " " + port);
             }
             System.out.println("Service restarted (blue-green swap complete).");

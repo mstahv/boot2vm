@@ -72,7 +72,7 @@ Does this service expose web endpoints (yes/no) [yes]:
 Domain(s) (comma-separated for multiple) [myapp.example.com]:
 SSH public key [~/.ssh/id_rsa.pub]:
 Admin SSH user [root]:
-HTTPS [yes]:
+HTTPS (yes/no/internal) [yes]:
 Reverse proxy (caddy/none) [caddy]:
 App type (spring-boot/quarkus/plain) [spring-boot]:
 Only the host is required — sensible defaults are derived for the rest. Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
@@ -216,3 +216,57 @@ To test **automatic rollback**, uncomment the `System.exit(1)` line in the `@Pos
 ## For later
 
  * Nginx as an alternative reverse proxy option
+
+## Local HTTPS for a PWA
+
+Set `HTTPS=internal` and `PROXY=caddy` in `vmhosting.conf`, or choose `internal`
+at the HTTPS prompt in `Deploy init`. Run `init` to apply a changed TLS mode to
+an existing server; ordinary single-slot deployment does not rewrite the proxy.
+Existing `HTTPS=yes` (automatic HTTPS) and `HTTPS=no` (HTTP) remain supported.
+The internal mode explicitly writes `tls internal` in each Caddy site, including
+blue-green cutover, graceful draining and environment-triggered slot changes.
+No custom Caddy build or application code change is needed.
+
+For example, use `DOMAIN=pwatest.local` with working mDNS on your LAN, or a
+hostname resolved by your local DNS. HTTPS does not configure DNS or limit
+network access: keep the server behind your LAN firewall if local-only access
+is intended. `init` can open 80/443 in the host firewall; internal TLS does not
+make those ports private or change router/IPv6 firewall policy.
+
+After provisioning, export the public root certificate over SSH:
+
+```sh
+Deploy root-cert ~/Downloads/pwatest-root.crt
+```
+
+The command reads the CA created by the standard Debian Caddy service, validates
+it, prints its SHA-256 fingerprint and refuses to overwrite an existing file.
+It requires the server's CA to exist (start/reload Caddy first). Only the public
+certificate is exported, never `root.key`. Transfer it to devices you administer
+using a trusted channel. Trusting this CA authorizes it to issue certificates
+for other hostnames too; it is not a trust exception limited to this app.
+
+- **iPhone/iPad:** transfer the certificate (for example using AirDrop), allow
+  the profile download, and install it under Settings → General → VPN & Device
+  Management (or Profile Downloaded). Then separately enable it under Settings
+  → General → About → Certificate Trust Settings → Enable Full Trust for Root
+  Certificates. [Apple's TLS trust instructions](https://support.apple.com/102390).
+- **Android:** save the certificate in Downloads. In Settings, search for
+  “Install a certificate”; on Pixel this is under Security & privacy → More
+  security settings → Encryption & credentials. Choose **CA certificate**,
+  confirm the warning/PIN and select the file. Manufacturer labels vary. Use
+  the CA option, not a Wi-Fi or VPN/client identity certificate. Android may
+  display a notice about network monitoring after a CA is installed.
+  [Android certificate settings](https://support.google.com/pixelphone/answer/2844832).
+
+Reopen the HTTPS hostname in Safari/Chrome and check that no certificate warning
+appears before installing the PWA. Native Android apps can have separate trust
+policies; installing a user CA is not a promise that every app accepts it.
+
+Keep `/var/lib/caddy/.local/share/caddy` persistent and protect its private keys.
+Caddy renews the site certificates automatically; clients need the root installed
+only once while that CA is retained. Replacing the server's CA requires installing
+the replacement root. Remove an unused root from devices when retiring the setup.
+For a public certificate without client-side installation, use an owned domain
+and DNS-01 validation instead; that needs a DNS provider module and configuration
+beyond boot2vm's current built-in TLS modes.
