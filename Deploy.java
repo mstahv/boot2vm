@@ -807,8 +807,7 @@ public class Deploy {
             domainRaw = defaultDomain != null ? defaultDomain : host;
         }
         domain = domainRaw.replaceAll("\\s*,\\s*", " ").trim();
-        String sshKeyRaw = prompt(console, "SSH public key",
-                defaultKey != null ? defaultKey : "~/.ssh/id_rsa.pub");
+        String sshKeyRaw = promptSshKey(console, defaultKey);
         adminUser = prompt(console, "Admin SSH user",
                 defaultAdmin != null ? defaultAdmin : "root");
         if (webService) {
@@ -961,6 +960,66 @@ public class Deploy {
                 : label + ": ";
         String input = console.readLine(p).trim();
         return input.isEmpty() && defaultValue != null ? defaultValue : input;
+    }
+
+    /**
+     * Ask for the SSH public key. Lists the *.pub files found in ~/.ssh so the
+     * user can pick one by number instead of typing the full path. A path can
+     * still be typed directly. The returned value keeps the ~ prefix so the
+     * written vmhosting.conf stays portable between machines and users.
+     */
+    static String promptSshKey(Console console, String defaultKey) throws IOException {
+        Path sshDir = Path.of(System.getProperty("user.home"), ".ssh");
+        List<String> keys = new ArrayList<>();
+        if (Files.isDirectory(sshDir)) {
+            try (var stream = Files.list(sshDir)) {
+                stream.filter(f -> f.getFileName().toString().endsWith(".pub"))
+                        .filter(Files::isRegularFile)
+                        .map(f -> "~/.ssh/" + f.getFileName())
+                        .sorted()
+                        .forEach(keys::add);
+            }
+        }
+
+        // Pick a default: previous config value, then common key names, then the first key found
+        String def = defaultKey;
+        String home = System.getProperty("user.home");
+        if (def != null && def.startsWith(home + "/")) {
+            def = "~" + def.substring(home.length());
+        }
+        if (def == null) {
+            for (String candidate : List.of("~/.ssh/id_ed25519.pub", "~/.ssh/id_rsa.pub", "~/.ssh/id_ecdsa.pub")) {
+                if (keys.contains(candidate)) {
+                    def = candidate;
+                    break;
+                }
+            }
+        }
+        if (def == null) {
+            def = keys.isEmpty() ? "~/.ssh/id_rsa.pub" : keys.get(0);
+        }
+
+        if (keys.isEmpty()) {
+            return prompt(console, "SSH public key", def);
+        }
+
+        System.out.println("SSH public keys found in ~/.ssh:");
+        for (int i = 0; i < keys.size(); i++) {
+            String marker = keys.get(i).equals(def) ? " (default)" : "";
+            System.out.printf("  %d) %s%s%n", i + 1, keys.get(i), marker);
+        }
+        while (true) {
+            String input = prompt(console, "SSH public key (number or path)", def);
+            if (input.matches("\\d+")) {
+                int idx = Integer.parseInt(input) - 1;
+                if (idx >= 0 && idx < keys.size()) {
+                    return keys.get(idx);
+                }
+                System.err.println("  Pick a number between 1 and " + keys.size() + ", or type a path.");
+                continue;
+            }
+            return input;
+        }
     }
 
     // -----------------------------------------------------------------------
