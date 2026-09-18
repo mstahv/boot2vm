@@ -70,11 +70,18 @@ Host (SSH address, a single hostname or IP): myapp.example.com
 App user [myapp]:
 Does this service expose web endpoints (yes/no) [yes]:
 Domain(s) (comma-separated for multiple) [myapp.example.com]:
-SSH public key [~/.ssh/id_rsa.pub]:
+SSH public keys found in ~/.ssh:
+  1) ~/.ssh/id_ed25519.pub (default)
+  2) ~/.ssh/id_rsa.pub
+SSH public key (number or path) [~/.ssh/id_ed25519.pub]:
 Admin SSH user [root]:
 HTTPS (yes/no/internal) [yes]:
 Reverse proxy (caddy/none) [caddy]:
 App type (spring-boot/quarkus/plain) [spring-boot]:
+JDK provider (temurin/zulu) [temurin]:
+Configure hardware access / JVM options (yes/no) [no]:
+```
+
 Only the host is required — sensible defaults are derived for the rest. Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
 
  1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot when required
@@ -166,6 +173,43 @@ Several independent apps can share one server. Each app is isolated by its own L
 Caddy routes requests to the right app by domain (or site port). Each app owns `/etc/caddy/sites/<user>.caddy` and the main Caddyfile just imports them, so deploys and `Deploy clean` of one app never touch the others. Re-running `init` for an additional app is safe: package installations are idempotent and firewall rules are added without resetting existing ones.
 
 Servers set up with an older version of this tool are migrated to the import-based Caddy layout automatically on the next `init` or blue-green deploy.
+
+## Hardware access and JVM options (Raspberry Pi etc.)
+
+Apps that talk to hardware — a typical Raspberry Pi + [Pi4J](https://pi4j.com/) setup — need the app user in a few Linux groups and often a JVM flag or two. Answer `yes` to *Configure hardware access / JVM options* in `Deploy init` to pick from presets and then edit the merged result:
+
+```
+Presets (groups are added to the app user, flags to the java command line):
+   1) Raspberry Pi GPIO/I2C/SPI/PWM (Pi4J, gpiod)
+      groups: gpio,i2c,spi; --enable-native-access=ALL-UNNAMED
+   2) Serial ports (/dev/ttyAMA*, /dev/ttyUSB*)
+      groups: dialout
+   3) Bluetooth (BlueZ over D-Bus)
+      groups: bluetooth
+   4) Camera (libcamera/rpicam, V4L2)
+      groups: video,render
+   ...
+Presets to apply (comma-separated numbers, blank for none): 1,2
+Extra JVM options [--enable-native-access=ALL-UNNAMED]:
+Extra groups for the app user (comma-separated) [gpio,i2c,spi,dialout]:
+```
+
+The result is stored in `vmhosting.conf`:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `JVM_OPTS` | *(empty)* | Extra flags for the `java` command line, e.g. `--enable-native-access=ALL-UNNAMED -Xmx512m` |
+| `USER_GROUPS` | *(empty)* | Comma-separated groups the app user is added to with `usermod -aG` (missing groups are skipped with a warning) |
+
+Groups are added to the app user itself rather than only to the systemd unit, so hardware access also works when you SSH in as the app user to test things by hand. Re-running `init` adds groups but never removes them; use `gpasswd -d <user> <group>` on the server for that.
+
+`JVM_OPTS` ends up in the unit as `Environment="JAVA_OPTS=..."` and `ExecStart=/usr/bin/java $JAVA_OPTS -jar ...`. Because the app's `.env` file is loaded after that line, the flags can be overridden without re-running `init`:
+
+```bash
+Deploy env set 'JAVA_OPTS=-Xmx256m -XX:+UseSerialGC'
+```
+
+Notes for Raspberry Pi OS: the `gpio`, `i2c`, `spi` and `video` groups get their device permissions from the stock udev rules, so no extra rules are needed. I2C, SPI, the serial port and the camera still have to be enabled with `raspi-config`. Pi4J 3.x uses the Java FFM API for `libgpiod`, which is why `--enable-native-access=ALL-UNNAMED` is part of the preset (JDK 24+ prints a warning without it, and later releases will refuse). Pi4J 2.x with the `pigpio` plugin needs root and is not supported by this setup; use the `gpiod`/`linuxfs` plugins instead.
 
 ## Graceful drain mode
 

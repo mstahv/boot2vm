@@ -10,6 +10,7 @@ public class Deploy {
 
     static String host, user, domain, sshKey, adminUser, proxy, appType, jdkProvider;
     static String httpsMode = "yes";
+    static String jvmOpts = "", userGroups = "";
     static boolean blueGreen;
     static boolean gracefulDrain;
     static boolean webService = true;
@@ -33,6 +34,8 @@ public class Deploy {
             WEB_SERVICE="${11:-yes}"
             JDK_PROVIDER="${12:-temurin}"  # temurin or zulu
             PORT="${13:-8080}"             # app port; blue-green green slot uses PORT+1
+            JVM_OPTS="${14:-}"             # extra JVM flags, exposed to the unit as JAVA_OPTS
+            USER_GROUPS="${15:-}"          # comma-separated extra groups for the app user (gpio,i2c,...)
 
             # Build Caddy site address (supports multiple domains)
             TLS_DIRECTIVE=""
@@ -108,6 +111,20 @@ public class Deploy {
             chmod 700 "/home/$APP_USER/.ssh"
             chmod 600 "/home/$APP_USER/.ssh/authorized_keys"
 
+            # Extra groups for hardware access (gpio, i2c, spi, dialout, ...). Added to the
+            # user itself rather than via SupplementaryGroups= in the unit, so the same
+            # access works when logging in as the app user to test things by hand.
+            if [ -n "$USER_GROUPS" ]; then
+                for GRP in ${USER_GROUPS//,/ }; do
+                    if getent group "$GRP" >/dev/null; then
+                        usermod -aG "$GRP" "$APP_USER"
+                        echo "Added $APP_USER to group $GRP"
+                    else
+                        echo "WARNING: group '$GRP' does not exist on this server, skipping"
+                    fi
+                done
+            fi
+
             # 4. Create application working directory/directories
             echo "--- Creating app directory/directories ---"
             if [ "$BLUE_GREEN" = "yes" ]; then
@@ -149,9 +166,9 @@ public class Deploy {
                         MGMT_ENV_LINE=""
                     fi
                     if [ "$APP_TYPE" = "quarkus" ]; then
-                        EXEC_START="/usr/bin/java -jar /home/$APP_USER/app-$SLOT/quarkus-app/quarkus-run.jar"
+                        EXEC_START="/usr/bin/java \\$JAVA_OPTS -jar /home/$APP_USER/app-$SLOT/quarkus-app/quarkus-run.jar"
                     else
-                        EXEC_START="/usr/bin/java -jar /home/$APP_USER/app-$SLOT/$APP_USER.jar"
+                        EXEC_START="/usr/bin/java \\$JAVA_OPTS -jar /home/$APP_USER/app-$SLOT/$APP_USER.jar"
                     fi
                     cat > "/etc/systemd/system/$APP_USER-$SLOT.service" << UNIT
             [Unit]
@@ -167,6 +184,7 @@ public class Deploy {
             Environment=APP_SLOT=$SLOT
             $MGMT_ENV_LINE
             $FWD_ENV_LINES
+            Environment="JAVA_OPTS=$JVM_OPTS"
             EnvironmentFile=-/home/$APP_USER/.env
             ExecStart=$EXEC_START
             Restart=on-failure
@@ -180,9 +198,9 @@ public class Deploy {
                 systemctl enable "$APP_USER-blue"
             else
                 if [ "$APP_TYPE" = "quarkus" ]; then
-                    EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/quarkus-app/quarkus-run.jar"
+                    EXEC_START="/usr/bin/java \\$JAVA_OPTS -jar /home/$APP_USER/app/quarkus-app/quarkus-run.jar"
                 else
-                    EXEC_START="/usr/bin/java -jar /home/$APP_USER/app/$APP_USER.jar"
+                    EXEC_START="/usr/bin/java \\$JAVA_OPTS -jar /home/$APP_USER/app/$APP_USER.jar"
                 fi
                 PORT_ENV_LINES=""
                 if [ "$WEB_SERVICE" = "yes" ]; then
@@ -199,6 +217,7 @@ public class Deploy {
             WorkingDirectory=/home/$APP_USER/app
             $PORT_ENV_LINES
             $FWD_ENV_LINES
+            Environment="JAVA_OPTS=$JVM_OPTS"
             EnvironmentFile=-/home/$APP_USER/.env
             ExecStart=$EXEC_START
             Restart=on-failure
@@ -712,6 +731,8 @@ public class Deploy {
         managementPort = props.getProperty("MANAGEMENT_PORT", "");
         notifyPath = props.getProperty("NOTIFY_PATH", "/actuator/new-version");
         activeUsersPath = props.getProperty("ACTIVE_USERS_PATH", "/actuator/active-users");
+        jvmOpts = props.getProperty("JVM_OPTS", "");
+        userGroups = props.getProperty("USER_GROUPS", "");
 
         if (sshKey.endsWith(".pub")) {
             sshKey = sshKey.substring(0, sshKey.length() - 4);
@@ -749,7 +770,8 @@ public class Deploy {
                 defaultBlueGreen = null, defaultGracefulDrain = null, defaultSlotCookie = null,
                 defaultDrainTimeout = null, defaultManagementPort = null, defaultNotifyPath = null,
                 defaultActiveUsersPath = null, defaultFirewall = null, defaultExposeNodes = null,
-                defaultWebService = null, defaultPort = null;
+                defaultWebService = null, defaultPort = null,
+                defaultJvmOpts = null, defaultUserGroups = null;
         if (Files.exists(configPath)) {
             var props = new Properties();
             try (var reader = Files.newBufferedReader(configPath)) {
@@ -775,6 +797,8 @@ public class Deploy {
             defaultExposeNodes = props.getProperty("EXPOSE_NODES");
             defaultWebService = props.getProperty("WEB_SERVICE");
             defaultPort = props.getProperty("PORT");
+            defaultJvmOpts = props.getProperty("JVM_OPTS");
+            defaultUserGroups = props.getProperty("USER_GROUPS");
         }
 
         // HOST (required, single hostname — extra domains are asked separately)
@@ -827,6 +851,7 @@ public class Deploy {
                 defaultAppType != null ? defaultAppType : detectAppType());
         jdkProvider = prompt(console, "JDK provider (temurin/zulu)",
                 defaultJdkProvider != null ? defaultJdkProvider : "temurin");
+        promptJvmAndHardware(console, defaultJvmOpts, defaultUserGroups);
         if (webService) {
             String blueGreenStr = prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
                     defaultBlueGreen != null ? defaultBlueGreen : "no");
@@ -903,7 +928,9 @@ public class Deploy {
                 + "ACTIVE_USERS_PATH=" + activeUsersPath + "\n"
                 + "FIREWALL=" + (firewall ? "yes" : "no") + "\n"
                 + "EXPOSE_NODES=" + (exposeNodes ? "yes" : "no") + "\n"
-                + "WEB_SERVICE=" + (webService ? "yes" : "no") + "\n");
+                + "WEB_SERVICE=" + (webService ? "yes" : "no") + "\n"
+                + "JVM_OPTS=" + jvmOpts + "\n"
+                + "USER_GROUPS=" + userGroups + "\n");
         System.out.println("Wrote vmhosting.conf");
 
         // Resolve the private key path for SSH connections (strip .pub if present)
@@ -931,7 +958,9 @@ public class Deploy {
                 + " " + (exposeNodes ? "yes" : "no")
                 + " " + (webService ? "yes" : "no")
                 + " " + jdkProvider
-                + " " + port);
+                + " " + port
+                + " " + shellQuote(jvmOpts)
+                + " " + shellQuote(userGroups));
 
         Files.delete(tempScript);
 
@@ -1020,6 +1049,86 @@ public class Deploy {
             }
             return input;
         }
+    }
+
+    /** A preset bundles the groups and JVM flags a typical use case needs. */
+    record Preset(String label, String groups, String jvmOpts) {}
+
+    static final List<Preset> PRESETS = List.of(
+            new Preset("Raspberry Pi GPIO/I2C/SPI/PWM (Pi4J, gpiod)", "gpio,i2c,spi", "--enable-native-access=ALL-UNNAMED"),
+            new Preset("Serial ports (/dev/ttyAMA*, /dev/ttyUSB*)", "dialout", ""),
+            new Preset("Bluetooth (BlueZ over D-Bus)", "bluetooth", ""),
+            new Preset("Camera (libcamera/rpicam, V4L2)", "video,render", ""),
+            new Preset("USB, HID and input devices", "plugdev,input", ""),
+            new Preset("Audio (ALSA)", "audio", ""),
+            new Preset("Native libraries (JNI/FFM: JNA, OpenCV, SQLite ...) without JDK 24+ warnings", "", "--enable-native-access=ALL-UNNAMED"),
+            new Preset("Small device (<= 2 GB RAM): serial GC, 60% of RAM for the heap", "", "-XX:+UseSerialGC -XX:MaxRAMPercentage=60"),
+            new Preset("Faster startup on a slow CPU (C1 JIT only, lower peak throughput)", "", "-XX:TieredStopAtLevel=1"),
+            new Preset("Exit on OutOfMemoryError so systemd restarts the app", "", "-XX:+ExitOnOutOfMemoryError"),
+            new Preset("Headless AWT (image processing on a server)", "", "-Djava.awt.headless=true"));
+
+    /**
+     * Ask for extra JVM options and extra Linux groups for the app user. Common
+     * use cases (Raspberry Pi hardware access, small devices, ...) can be picked
+     * from a list; the merged result is then shown for manual editing.
+     */
+    static void promptJvmAndHardware(Console console, String defaultJvmOpts, String defaultUserGroups) {
+        boolean hasPrevious = (defaultJvmOpts != null && !defaultJvmOpts.isBlank())
+                || (defaultUserGroups != null && !defaultUserGroups.isBlank());
+        jvmOpts = defaultJvmOpts != null ? defaultJvmOpts.trim() : "";
+        userGroups = defaultUserGroups != null ? defaultUserGroups.trim() : "";
+
+        String tune = prompt(console, "Configure hardware access / JVM options (yes/no)", hasPrevious ? "yes" : "no");
+        if (!"yes".equalsIgnoreCase(tune)) {
+            return;
+        }
+
+        var opts = new LinkedHashSet<String>();
+        if (!jvmOpts.isEmpty()) opts.addAll(List.of(jvmOpts.split("\\s+")));
+        var groups = new LinkedHashSet<String>();
+        if (!userGroups.isEmpty()) groups.addAll(List.of(userGroups.split("\\s*,\\s*")));
+
+        System.out.println("Presets (groups are added to the app user, flags to the java command line):");
+        for (int i = 0; i < PRESETS.size(); i++) {
+            Preset preset = PRESETS.get(i);
+            var details = new ArrayList<String>();
+            if (!preset.groups().isEmpty()) details.add("groups: " + preset.groups());
+            if (!preset.jvmOpts().isEmpty()) details.add(preset.jvmOpts());
+            System.out.printf("  %2d) %s%n      %s%n", i + 1, preset.label(), String.join("; ", details));
+        }
+        while (true) {
+            String picked = prompt(console, "Presets to apply (comma-separated numbers, blank for none)", null);
+            if (picked.isEmpty()) break;
+            boolean ok = true;
+            for (String token : picked.split("\\s*[,\\s]\\s*")) {
+                if (token.isEmpty()) continue;
+                int idx = token.matches("\\d+") ? Integer.parseInt(token) - 1 : -1;
+                if (idx < 0 || idx >= PRESETS.size()) {
+                    System.err.println("  '" + token + "' is not a preset number between 1 and " + PRESETS.size());
+                    ok = false;
+                    break;
+                }
+                Preset preset = PRESETS.get(idx);
+                if (!preset.groups().isEmpty()) groups.addAll(List.of(preset.groups().split(",")));
+                if (!preset.jvmOpts().isEmpty()) opts.addAll(List.of(preset.jvmOpts().split(" ")));
+            }
+            if (ok) break;
+        }
+
+        String mergedOpts = String.join(" ", opts);
+        String mergedGroups = String.join(",", groups);
+        jvmOpts = prompt(console, "Extra JVM options", mergedOpts.isEmpty() ? null : mergedOpts).trim();
+        if (jvmOpts.contains("\"")) {
+            System.err.println("  Double quotes are not supported in JVM options (the value is written into a quoted systemd Environment= line)");
+            System.exit(1);
+        }
+        userGroups = prompt(console, "Extra groups for the app user (comma-separated)", mergedGroups.isEmpty() ? null : mergedGroups)
+                .replaceAll("\\s*,\\s*", ",").trim();
+    }
+
+    /** Quote a value for use as a single argument in a remote sh command line. */
+    static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
     }
 
     // -----------------------------------------------------------------------
