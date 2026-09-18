@@ -180,19 +180,21 @@ Apps that talk to hardware — a typical Raspberry Pi + [Pi4J](https://pi4j.com/
 
 ```
 Presets (groups are added to the app user, flags to the java command line):
-   1) Raspberry Pi GPIO/I2C/SPI/PWM (Pi4J, gpiod)
-      groups: gpio,i2c,spi; --enable-native-access=ALL-UNNAMED
-   2) Serial ports (/dev/ttyAMA*, /dev/ttyUSB*)
-      groups: dialout
-   3) Bluetooth (BlueZ over D-Bus)
-      groups: bluetooth
-   4) Camera (libcamera/rpicam, V4L2)
-      groups: video,render
+        1 / pi) Raspberry Pi, everything: all hardware groups below, native access, restart on OOM
+                groups: gpio,i2c,spi,dialout,bluetooth,video,render,plugdev,input,audio; --enable-native-access=ALL-UNNAMED -XX:+ExitOnOutOfMemoryError
+   2 / pi-zero) Raspberry Pi Zero / 512 MB class: as above plus serial GC, 60% heap, C1 JIT only
+                groups: ...; ... -XX:+UseSerialGC -XX:MaxRAMPercentage=60 -XX:TieredStopAtLevel=1
+             3) Raspberry Pi GPIO/I2C/SPI/PWM (Pi4J, gpiod)
+                groups: gpio,i2c,spi; --enable-native-access=ALL-UNNAMED
+             4) Serial ports (/dev/ttyAMA*, /dev/ttyUSB*)
+                groups: dialout
    ...
-Presets to apply (comma-separated numbers, blank for none): 1,2
+Presets to apply (comma-separated numbers or names, blank for none): 3,4
 Extra JVM options [--enable-native-access=ALL-UNNAMED]:
 Extra groups for the app user (comma-separated) [gpio,i2c,spi,dialout]:
 ```
+
+For the lazy: type `pi` for a Raspberry Pi with all hardware groups, or `pi-zero` for a Pi Zero 2 W and other 512 MB class boards, where the JVM is additionally tuned for a small and slow machine.
 
 The result is stored in `vmhosting.conf`:
 

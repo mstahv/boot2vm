@@ -1051,10 +1051,24 @@ public class Deploy {
         }
     }
 
-    /** A preset bundles the groups and JVM flags a typical use case needs. */
-    record Preset(String label, String groups, String jvmOpts) {}
+    /**
+     * A preset bundles the groups and JVM flags a typical use case needs. Bundles
+     * with an alias can also be picked by name instead of number.
+     */
+    record Preset(String label, String groups, String jvmOpts, String alias) {
+        Preset(String label, String groups, String jvmOpts) {
+            this(label, groups, jvmOpts, null);
+        }
+    }
+
+    static final String PI_GROUPS = "gpio,i2c,spi,dialout,bluetooth,video,render,plugdev,input,audio";
 
     static final List<Preset> PRESETS = List.of(
+            new Preset("Raspberry Pi, everything: all hardware groups below, native access, restart on OOM",
+                    PI_GROUPS, "--enable-native-access=ALL-UNNAMED -XX:+ExitOnOutOfMemoryError", "pi"),
+            new Preset("Raspberry Pi Zero / 512 MB class: as above plus serial GC, 60% heap, C1 JIT only",
+                    PI_GROUPS, "--enable-native-access=ALL-UNNAMED -XX:+ExitOnOutOfMemoryError"
+                            + " -XX:+UseSerialGC -XX:MaxRAMPercentage=60 -XX:TieredStopAtLevel=1", "pi-zero"),
             new Preset("Raspberry Pi GPIO/I2C/SPI/PWM (Pi4J, gpiod)", "gpio,i2c,spi", "--enable-native-access=ALL-UNNAMED"),
             new Preset("Serial ports (/dev/ttyAMA*, /dev/ttyUSB*)", "dialout", ""),
             new Preset("Bluetooth (BlueZ over D-Bus)", "bluetooth", ""),
@@ -1094,21 +1108,21 @@ public class Deploy {
             var details = new ArrayList<String>();
             if (!preset.groups().isEmpty()) details.add("groups: " + preset.groups());
             if (!preset.jvmOpts().isEmpty()) details.add(preset.jvmOpts());
-            System.out.printf("  %2d) %s%n      %s%n", i + 1, preset.label(), String.join("; ", details));
+            String number = preset.alias() != null ? (i + 1) + " / " + preset.alias() : String.valueOf(i + 1);
+            System.out.printf("  %12s) %s%n%16s%s%n", number, preset.label(), "", String.join("; ", details));
         }
         while (true) {
-            String picked = prompt(console, "Presets to apply (comma-separated numbers, blank for none)", null);
+            String picked = prompt(console, "Presets to apply (comma-separated numbers or names, blank for none)", null);
             if (picked.isEmpty()) break;
             boolean ok = true;
             for (String token : picked.split("\\s*[,\\s]\\s*")) {
                 if (token.isEmpty()) continue;
-                int idx = token.matches("\\d+") ? Integer.parseInt(token) - 1 : -1;
-                if (idx < 0 || idx >= PRESETS.size()) {
-                    System.err.println("  '" + token + "' is not a preset number between 1 and " + PRESETS.size());
+                Preset preset = findPreset(token);
+                if (preset == null) {
+                    System.err.println("  '" + token + "' is not a preset number between 1 and " + PRESETS.size() + " or a preset name");
                     ok = false;
                     break;
                 }
-                Preset preset = PRESETS.get(idx);
                 if (!preset.groups().isEmpty()) groups.addAll(List.of(preset.groups().split(",")));
                 if (!preset.jvmOpts().isEmpty()) opts.addAll(List.of(preset.jvmOpts().split(" ")));
             }
@@ -1124,6 +1138,16 @@ public class Deploy {
         }
         userGroups = prompt(console, "Extra groups for the app user (comma-separated)", mergedGroups.isEmpty() ? null : mergedGroups)
                 .replaceAll("\\s*,\\s*", ",").trim();
+    }
+
+    static Preset findPreset(String token) {
+        if (token.matches("\\d+")) {
+            int idx = Integer.parseInt(token) - 1;
+            return idx >= 0 && idx < PRESETS.size() ? PRESETS.get(idx) : null;
+        }
+        return PRESETS.stream()
+                .filter(p -> token.equalsIgnoreCase(p.alias()))
+                .findFirst().orElse(null);
     }
 
     /** Quote a value for use as a single argument in a remote sh command line. */
