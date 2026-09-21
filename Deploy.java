@@ -932,15 +932,28 @@ public class Deploy {
     // init – interactively collect config, write vmhosting.conf, set up server
     // -----------------------------------------------------------------------
     static void init(List<String> selected, String from) throws Exception {
+        if (selected.size() > 1) {
+            throw new CommandFailed("init sets up one target at a time", 1);
+        }
+        String targetName = selected.isEmpty() ? "default" : selected.get(0);
+        if (!targetName.matches("[A-Za-z0-9_-]+")) {
+            throw new CommandFailed("Target name may contain only letters, digits, '-' and '_': " + targetName, 1);
+        }
         var console = System.console();
         if (console == null) {
             System.err.println("No console available for interactive input");
             System.exit(1);
         }
-        if (selected.size() > 1) {
-            throw new CommandFailed("init sets up one target at a time", 1);
+        if (selected.isEmpty() && allTargets().isEmpty()) {
+            // First server of a fresh project: offer a name right away, so that later
+            // additions leave no anonymous "default" whose host nobody remembers.
+            while (true) {
+                targetName = prompt(console, "Name for this server target (used as @name; blank keeps plain vmhosting.conf)", "default");
+                if (targetName.matches("[A-Za-z0-9_-]+")) break;
+                System.err.println("  Use only letters, digits, '-' and '_'");
+            }
         }
-        Target target = Target.named(selected.isEmpty() ? "default" : selected.get(0));
+        Target target = Target.named(targetName);
         currentTarget = target;
         Path configPath = target.path();
 

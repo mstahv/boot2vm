@@ -71,6 +71,7 @@ Deploy logs @pi2
 Interactive one-time setup. Prompts for connection details, writes a `vmhosting.conf` in the current directory, then provisions the server:
 
 ```
+Name for this server target (used as @name; blank keeps plain vmhosting.conf) [default]: cloud
 Host (SSH address, a single hostname or IP): myapp.example.com
 App user [myapp]:
 Does this service expose web endpoints (yes/no) [yes]:
@@ -172,7 +173,8 @@ Deploy logs       # watch it run
 Each server is a *target* with its own config file: `vmhosting.conf` is `@default` and `vmhosting.<name>.conf` is `@<name>`. Every file is a complete config, so targets may differ freely (a cloud VM with HTTPS and blue-green next to a Raspberry Pi on `pi.local` with its own JVM flags). Pass `@name` anywhere on the command line to select targets:
 
 ```bash
-Deploy init @pi2                 # add a server; defaults come from vmhosting.conf, so mostly just type the host
+Deploy init @cloud               # first server can be named right away (plain 'init' asks for a name too)
+Deploy init @pi2                 # add a server; defaults come from the existing config, so mostly just type the host
 Deploy init @pi3 --from @pi2     # ... or copy the defaults from another target
 Deploy targets                   # list servers
 Deploy                           # build once, then deploy to every target in order
