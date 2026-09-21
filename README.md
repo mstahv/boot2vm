@@ -82,7 +82,7 @@ JDK provider (temurin/zulu) [temurin]:
 Configure hardware access / JVM options (yes/no) [no]:
 ```
 
-Only the host is required — sensible defaults are derived for the rest. Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
+Only the host is required — sensible defaults are derived for the rest. HTTPS defaults to `no` when the domain is a LAN address a public CA cannot issue a certificate for, such as `raspberrypi.local`, a bare hostname or an IP; for those pick `internal` if you need HTTPS (see *Local HTTPS for a PWA* below). Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
 
  1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot when required
  2. Installs **JDK 25** (Eclipse Adoptium / Temurin)

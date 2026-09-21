@@ -650,6 +650,28 @@ public class Deploy {
         System.out.println("  root-cert [file] - Export Caddy public root CA (default: caddy-root.crt)");
     }
 
+    /**
+     * True when every given (space-separated) address is something a public CA
+     * cannot issue a certificate for: a .local/mDNS name, a bare hostname without
+     * a dot, or an IP address. Used to default HTTPS to "no" for LAN devices.
+     */
+    static boolean isLocalAddress(String addresses) {
+        for (String address : addresses.trim().split("\\s+")) {
+            String a = address.toLowerCase(Locale.ROOT);
+            int colon = a.indexOf(':');
+            if (colon > 0 && a.indexOf(':', colon + 1) < 0) {
+                a = a.substring(0, colon); // strip a :port suffix, but not an IPv6 literal
+            }
+            boolean local = a.endsWith(".local") || a.endsWith(".lan") || a.endsWith(".home.arpa")
+                    || a.endsWith(".internal") || !a.contains(".")
+                    || a.matches("\\d{1,3}(\\.\\d{1,3}){3}") || a.contains(":");
+            if (!local) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static String parseHttpsMode(String value) {
         String mode = value.trim().toLowerCase(Locale.ROOT);
         if (!Set.of("yes", "no", "internal").contains(mode)) {
@@ -836,7 +858,7 @@ public class Deploy {
                 defaultAdmin != null ? defaultAdmin : "root");
         if (webService) {
             String httpsStr = prompt(console, "HTTPS (yes/no/internal)",
-                    defaultHttps != null ? defaultHttps : "yes");
+                    defaultHttps != null ? defaultHttps : (isLocalAddress(domain) ? "no" : "yes"));
             httpsMode = parseHttpsMode(httpsStr);
             proxy = prompt(console, "Reverse proxy (caddy/none)",
                     defaultProxy != null ? defaultProxy : "caddy");
