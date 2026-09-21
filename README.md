@@ -59,6 +59,11 @@ Deploy logs
 
 # Grant deploy access to a colleague or CI server
 Deploy add-key ~/.ssh/colleague_id_rsa.pub
+
+# Same app on several servers: add one, deploy to all, look at one
+Deploy init @pi2
+Deploy
+Deploy logs @pi2
 ```
 
 ### `Deploy init`
@@ -134,7 +139,7 @@ Note: values with spaces must be quoted (`KEY="value with spaces"`), `#` lines a
 
 ### `Deploy clean`
 
-Removes the deployed application from the server: stops and removes the systemd service, resets the Caddy config (if used), and deletes the app user and its home directory. JDK, Caddy, and other system packages are left installed. Useful for testing or starting fresh — run `Deploy init` again afterwards to re-provision.
+Removes the deployed application from the server (with several targets, name one: `Deploy clean @pi2`): stops and removes the systemd service, resets the Caddy config (if used), and deletes the app user and its home directory. JDK, Caddy, and other system packages are left installed. Useful for testing or starting fresh — run `Deploy init` again afterwards to re-provision.
 
 ADMIN_USER=root
 PROXY=caddy
@@ -161,6 +166,23 @@ Deploy init       # enter: somehost.somewhere.com (then Enter through the defaul
                   # ... builds, syncs, starts — open https://somehost.somewhere.com
 Deploy logs       # watch it run
 ```
+
+## One app on multiple servers
+
+Each server is a *target* with its own config file: `vmhosting.conf` is `@default` and `vmhosting.<name>.conf` is `@<name>`. Every file is a complete config, so targets may differ freely (a cloud VM with HTTPS and blue-green next to a Raspberry Pi on `pi.local` with its own JVM flags). Pass `@name` anywhere on the command line to select targets:
+
+```bash
+Deploy init @pi2                 # add a server; defaults come from vmhosting.conf, so mostly just type the host
+Deploy init @pi3 --from @pi2     # ... or copy the defaults from another target
+Deploy targets                   # list servers
+Deploy                           # build once, then deploy to every target in order
+Deploy deploy @pi2 @pi3          # only these
+Deploy env set FOO=bar           # all targets; env, add-key and deploy default to all
+Deploy logs @pi2                 # logs, root-cert and clean work on exactly one target
+Deploy clean @pi3                # removes the app from that server and deletes vmhosting.pi3.conf
+```
+
+With a single config file the `@` selector is never needed, so existing projects work unchanged. When several targets are deployed, the app is built once and each target is synced and restarted in turn (blue-green swaps and rollbacks happen per server). A failure stops the run and lists the targets that were not attempted, so a broken build is never rolled out everywhere. All targets must share the same `APP_TYPE`; this is checked before anything is built.
 
 ## Multiple apps on the same server
 

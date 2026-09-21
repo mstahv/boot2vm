@@ -11,6 +11,27 @@ public class Deploy {
     static String host, user, domain, sshKey, adminUser, proxy, appType, jdkProvider;
     static String httpsMode = "yes";
     static String jvmOpts = "", userGroups = "";
+
+    /** A deploy target: one server config file. "default" is vmhosting.conf, others vmhosting.<name>.conf */
+    record Target(String name, Path path) {
+        static Target named(String name) {
+            return "default".equals(name)
+                    ? new Target("default", Path.of("vmhosting.conf"))
+                    : new Target(name, Path.of("vmhosting." + name + ".conf"));
+        }
+    }
+
+    /** Thrown when a local or remote command fails; main() turns it into the exit code. */
+    static class CommandFailed extends RuntimeException {
+        final int exitCode;
+        CommandFailed(String message, int exitCode) {
+            super(message);
+            this.exitCode = exitCode;
+        }
+    }
+
+    /** The target whose config is currently loaded into the static fields. */
+    static Target currentTarget = Target.named("default");
     static boolean blueGreen;
     static boolean gracefulDrain;
     static boolean webService = true;
@@ -614,31 +635,162 @@ public class Deploy {
             echo "=== Graceful blue-green deploy complete! Active slot: $INACTIVE_LABEL ==="
             """;
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] rawArgs) throws Exception {
+        // Split "@name" target selectors (and "--from @name" for init) from the real arguments
+        var selected = new ArrayList<String>();
+        var rest = new ArrayList<String>();
+        String from = null;
+        for (int i = 0; i < rawArgs.length; i++) {
+            String arg = rawArgs[i];
+            if ("--from".equals(arg)) {
+                if (i + 1 >= rawArgs.length) throw new IllegalArgumentException("--from needs a target name");
+                from = rawArgs[++i].replaceFirst("^@", "");
+            } else if (arg.startsWith("@") && arg.length() > 1) {
+                selected.add(arg.substring(1));
+            } else {
+                rest.add(arg);
+            }
+        }
+        String[] args = rest.toArray(new String[0]);
         String command = args.length == 0 ? "deploy" : args[0];
 
-        switch (command) {
-            case "init" -> init();
-            case "deploy" -> { loadConfig(); deploy(); }
-            case "logs" -> { loadConfig(); logs(args); }
-            case "env" -> { loadConfig(); env(args); }
-            case "add-key" -> { loadConfig(); addKey(args); }
-            case "clean" -> { loadConfig(); clean(); }
-            case "root-cert" -> { loadConfig(); rootCert(args); }
-            default -> {
-                System.err.println("Unknown command: " + command);
-                printUsage();
-                System.exit(1);
+        try {
+            switch (command) {
+                case "init" -> init(selected, from);
+                case "deploy" -> deployTargets(resolveTargets(selected, true));
+                case "logs" -> { loadConfig(singleTarget(selected, "logs")); logs(args); }
+                case "env" -> env(args, selected);
+                case "add-key" -> addKey(args, resolveTargets(selected, true));
+                case "clean" -> clean(selected);
+                case "root-cert" -> { loadConfig(singleTarget(selected, "root-cert")); rootCert(args); }
+                case "targets" -> listTargets();
+                default -> {
+                    System.err.println("Unknown command: " + command);
+                    printUsage();
+                    System.exit(1);
+                }
+            }
+        } catch (CommandFailed e) {
+            System.err.println(e.getMessage());
+            System.exit(e.exitCode);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // targets – one app deployed to several servers, one config file each
+    // -----------------------------------------------------------------------
+
+    /** All targets found in the current directory: vmhosting.conf first, then vmhosting.<name>.conf sorted. */
+    static List<Target> allTargets() throws IOException {
+        var targets = new ArrayList<Target>();
+        Target def = Target.named("default");
+        if (Files.exists(def.path())) targets.add(def);
+        var named = new ArrayList<Target>();
+        try (var stream = Files.list(Path.of("."))) {
+            stream.map(f -> f.getFileName().toString())
+                    .filter(n -> n.matches("vmhosting\\.[A-Za-z0-9_-]+\\.conf"))
+                    .sorted()
+                    .forEach(n -> named.add(Target.named(n.substring("vmhosting.".length(), n.length() - ".conf".length()))));
+        }
+        targets.addAll(named);
+        return targets;
+    }
+
+    /**
+     * Targets to operate on: the ones selected with @name, or (when allowed) every
+     * target in the directory. Fails when nothing matches so a typo never silently
+     * hits the wrong server.
+     */
+    static List<Target> resolveTargets(List<String> selected, boolean allWhenUnselected) throws IOException {
+        List<Target> all = allTargets();
+        if (all.isEmpty()) {
+            throw new CommandFailed("No vmhosting.conf (or vmhosting.<name>.conf) found in current directory. Run 'init' first.", 1);
+        }
+        if (selected.isEmpty()) {
+            if (allWhenUnselected) return all;
+            throw new CommandFailed("Select a target with @name. Available: " + targetNames(all), 1);
+        }
+        var result = new ArrayList<Target>();
+        for (String name : selected) {
+            Target t = Target.named(name);
+            if (!Files.exists(t.path())) {
+                throw new CommandFailed("Unknown target '@" + name + "' (" + t.path() + " not found). Available: " + targetNames(all), 1);
+            }
+            if (!result.contains(t)) result.add(t);
+        }
+        return result;
+    }
+
+    /** Commands like logs need exactly one target; with a single config it is implied. */
+    static Target singleTarget(List<String> selected, String command) throws IOException {
+        List<Target> all = allTargets();
+        if (selected.isEmpty() && all.size() == 1) return all.get(0);
+        if (selected.isEmpty()) {
+            throw new CommandFailed("'" + command + "' needs one target, e.g. 'Deploy " + command + " @" + all.get(0).name()
+                    + "'. Available: " + targetNames(all), 1);
+        }
+        if (selected.size() > 1) {
+            throw new CommandFailed("'" + command + "' works on one target at a time", 1);
+        }
+        return resolveTargets(selected, false).get(0);
+    }
+
+    static String targetNames(List<Target> targets) {
+        var names = new ArrayList<String>();
+        for (Target t : targets) names.add("@" + t.name());
+        return String.join(" ", names);
+    }
+
+    static void printTargetHeader(Target target) {
+        System.out.println();
+        System.out.println("=== " + target.name() + " (" + user + "@" + host + ") ===");
+    }
+
+    static void listTargets() throws Exception {
+        List<Target> all = allTargets();
+        if (all.isEmpty()) {
+            System.out.println("No targets. Run 'Deploy init' (or 'Deploy init @name') first.");
+            return;
+        }
+        System.out.printf("%-12s %-30s %-14s %-6s %s%n", "TARGET", "HOST", "USER", "PORT", "FILE");
+        for (Target t : all) {
+            loadConfig(t);
+            String mode = blueGreen ? (gracefulDrain ? "blue-green+drain" : "blue-green") : "simple";
+            System.out.printf("%-12s %-30s %-14s %-6d %s (%s, https=%s)%n",
+                    "@" + t.name(), host, user, port, t.path(), mode, httpsMode);
+        }
+    }
+
+    /**
+     * Run an action for each target in order, loading its config first. Stops at
+     * the first failure and lists the targets that were not reached.
+     */
+    interface TargetAction { void run(Target target) throws Exception; }
+
+    static void forEachTarget(List<Target> targets, TargetAction action) throws Exception {
+        for (int i = 0; i < targets.size(); i++) {
+            Target target = targets.get(i);
+            loadConfig(target);
+            if (targets.size() > 1) printTargetHeader(target);
+            try {
+                action.run(target);
+            } catch (CommandFailed e) {
+                if (i + 1 < targets.size()) {
+                    System.err.println("Failed on @" + target.name() + "; not attempted: "
+                            + targetNames(targets.subList(i + 1, targets.size())));
+                }
+                throw e;
             }
         }
     }
 
     static void printUsage() {
-        System.out.println("Usage: jbang Deploy.java <command>");
+        System.out.println("Usage: jbang Deploy.java <command> [@target ...]");
         System.out.println();
         System.out.println("Commands:");
-        System.out.println("  init           - Set up the server (run once)");
-        System.out.println("  deploy         - Build, sync, and restart the app");
+        System.out.println("  init           - Set up the server (run once); 'init @name [--from @other]' adds another server");
+        System.out.println("  deploy         - Build once, then sync and restart on every target (or the given @targets)");
+        System.out.println("  targets        - List the configured servers");
         System.out.println("  logs [n] [slot] - Tail the application logs (default: 200 lines)");
         System.out.println("                    slot: active (default), inactive, blue, green");
         System.out.println("  env            - List environment variables on the server");
@@ -648,6 +800,10 @@ public class Deploy {
         System.out.println("  add-key [file] - Add an SSH public key to the server");
         System.out.println("  clean          - Remove the app, service, and user from the server");
         System.out.println("  root-cert [file] - Export Caddy public root CA (default: caddy-root.crt)");
+        System.out.println();
+        System.out.println("Targets: vmhosting.conf is @default, vmhosting.<name>.conf is @<name>.");
+        System.out.println("deploy, env and add-key run on all targets unless @targets are given;");
+        System.out.println("logs, root-cert and clean work on one target.");
     }
 
     /**
@@ -720,12 +876,12 @@ public class Deploy {
         System.out.println("SHA-256: " + fingerprint);
     }
 
-    static void loadConfig() throws IOException {
-        Path config = Path.of("vmhosting.conf");
+    static void loadConfig(Target target) throws IOException {
+        Path config = target.path();
         if (!Files.exists(config)) {
-            System.err.println("vmhosting.conf not found in current directory. Run 'init' first.");
-            System.exit(1);
+            throw new CommandFailed(config + " not found in current directory. Run 'init' first.", 1);
         }
+        currentTarget = target;
         var props = new Properties();
         try (var reader = Files.newBufferedReader(config)) {
             props.load(reader);
@@ -764,28 +920,45 @@ public class Deploy {
         }
 
         if (host == null || user == null) {
-            System.err.println("HOST and USER must be set in vmhosting.conf");
-            System.exit(1);
+            throw new CommandFailed("HOST and USER must be set in " + config, 1);
         }
         if (host.contains(",") || host.matches(".*\\s.*")) {
-            System.err.println("HOST in vmhosting.conf must be a single hostname or IP (got: '" + host
-                    + "'). Put additional domains in DOMAIN instead.");
-            System.exit(1);
+            throw new CommandFailed("HOST in " + config + " must be a single hostname or IP (got: '" + host
+                    + "'). Put additional domains in DOMAIN instead.", 1);
         }
     }
 
     // -----------------------------------------------------------------------
     // init – interactively collect config, write vmhosting.conf, set up server
     // -----------------------------------------------------------------------
-    static void init() throws Exception {
+    static void init(List<String> selected, String from) throws Exception {
         var console = System.console();
         if (console == null) {
             System.err.println("No console available for interactive input");
             System.exit(1);
         }
+        if (selected.size() > 1) {
+            throw new CommandFailed("init sets up one target at a time", 1);
+        }
+        Target target = Target.named(selected.isEmpty() ? "default" : selected.get(0));
+        currentTarget = target;
+        Path configPath = target.path();
 
-        // Load existing config as defaults if available
-        Path configPath = Path.of("vmhosting.conf");
+        // Defaults come from: --from @other, else this target's own file, else vmhosting.conf.
+        // That makes adding a server mostly a matter of typing its host and pressing Enter.
+        Path defaultsPath = configPath;
+        if (from != null) {
+            defaultsPath = Target.named(from).path();
+            if (!Files.exists(defaultsPath)) {
+                throw new CommandFailed("--from target '@" + from + "' not found (" + defaultsPath + ")", 1);
+            }
+        } else if (!Files.exists(configPath)) {
+            List<Target> existing = allTargets();
+            if (!existing.isEmpty()) defaultsPath = existing.get(0).path();
+        }
+        if (!defaultsPath.equals(configPath) && Files.exists(defaultsPath)) {
+            System.out.println("New target @" + target.name() + " (" + configPath + "), defaults taken from " + defaultsPath);
+        }
         String defaultHost = null, defaultUser = null, defaultDomain = null,
                 defaultKey = null, defaultAdmin = null, defaultHttps = null,
                 defaultProxy = null, defaultAppType = null, defaultJdkProvider = null,
@@ -794,12 +967,13 @@ public class Deploy {
                 defaultActiveUsersPath = null, defaultFirewall = null, defaultExposeNodes = null,
                 defaultWebService = null, defaultPort = null,
                 defaultJvmOpts = null, defaultUserGroups = null;
-        if (Files.exists(configPath)) {
+        if (Files.exists(defaultsPath)) {
             var props = new Properties();
-            try (var reader = Files.newBufferedReader(configPath)) {
+            try (var reader = Files.newBufferedReader(defaultsPath)) {
                 props.load(reader);
             }
-            defaultHost = props.getProperty("HOST");
+            // Never suggest another server's host as the default for a new target
+            defaultHost = defaultsPath.equals(configPath) ? props.getProperty("HOST") : null;
             defaultUser = props.getProperty("USER");
             defaultDomain = props.getProperty("DOMAIN");
             defaultKey = props.getProperty("SSH_KEY");
@@ -953,7 +1127,7 @@ public class Deploy {
                 + "WEB_SERVICE=" + (webService ? "yes" : "no") + "\n"
                 + "JVM_OPTS=" + jvmOpts + "\n"
                 + "USER_GROUPS=" + userGroups + "\n");
-        System.out.println("Wrote vmhosting.conf");
+        System.out.println("Wrote " + configPath);
 
         // Resolve the private key path for SSH connections (strip .pub if present)
         sshKey = sshKeyRaw;
@@ -1001,8 +1175,8 @@ public class Deploy {
 
         System.out.println("Server initialized successfully.\n");
 
-        // Automatically run first deploy
-        deploy();
+        // Automatically run first deploy, for this target only
+        deployTargets(List.of(target));
     }
 
     static String prompt(Console console, String label, String defaultValue) {
@@ -1180,7 +1354,26 @@ public class Deploy {
     // -----------------------------------------------------------------------
     // deploy – build, sync, restart
     // -----------------------------------------------------------------------
-    static void deploy() throws Exception {
+    record Build(String appType, boolean quarkus, boolean plain, boolean mavenw, boolean pom) {}
+
+    /** Build once, then sync and restart on every given target in order. */
+    static void deployTargets(List<Target> targets) throws Exception {
+        // One app has one build: check every config before building or touching any server
+        loadConfig(targets.get(0));
+        String firstType = appType;
+        for (Target target : targets) {
+            loadConfig(target);
+            if (!appType.equals(firstType)) {
+                throw new CommandFailed("APP_TYPE differs between targets (" + firstType + " in " + targets.get(0).path()
+                        + " vs " + appType + " in " + target.path() + "); one app must have the same type everywhere", 1);
+            }
+        }
+        loadConfig(targets.get(0));
+        Build build = build();
+        forEachTarget(targets, target -> deploy(build));
+    }
+
+    static Build build() throws Exception {
         // 1. Build
         System.out.println("Building application ...");
         boolean mavenw = Files.exists(Path.of("mvnw"));
@@ -1200,10 +1393,14 @@ public class Deploy {
         } else if (gradle) {
             run("gradle", "-x", "test", gradleTask);
         } else {
-            System.err.println("No Maven or Gradle project found in current directory");
-            System.exit(1);
+            throw new CommandFailed("No Maven or Gradle project found in current directory", 1);
         }
+        return new Build(appType, quarkus, plain, mavenw, pom);
+    }
 
+    /** Sync the already built app to the currently loaded target and restart it. */
+    static void deploy(Build build) throws Exception {
+        boolean quarkus = build.quarkus(), plain = build.plain(), mavenw = build.mavenw(), pom = build.pom();
         if (blueGreen) {
             deployBlueGreen(quarkus, plain, mavenw, pom);
             return;
@@ -1257,7 +1454,7 @@ public class Deploy {
         System.out.println("Restarting service ...");
         sshAsRoot("systemctl restart " + user);
 
-        System.out.println("Deployed successfully!");
+        System.out.println("Deployed successfully to @" + currentTarget.name() + "!");
     }
 
     // -----------------------------------------------------------------------
@@ -1380,7 +1577,12 @@ public class Deploy {
     // -----------------------------------------------------------------------
     // add-key – register an additional SSH public key for the app user
     // -----------------------------------------------------------------------
-    static void addKey(String[] args) throws Exception {
+    static void addKey(String[] args, List<Target> targets) throws Exception {
+        String pubKey = resolvePublicKey(args);
+        forEachTarget(targets, target -> addKey(pubKey));
+    }
+
+    static String resolvePublicKey(String[] args) throws Exception {
         String pubKey;
         if (args.length > 1) {
             pubKey = readPublicKey(args[1]);
@@ -1397,7 +1599,10 @@ public class Deploy {
             System.err.println("Does not look like a valid SSH public key");
             System.exit(1);
         }
+        return pubKey;
+    }
 
+    static void addKey(String pubKey) throws Exception {
         System.out.println("Adding key to " + user + "@" + host + " ...");
         String escaped = pubKey.replace("\"", "\\\"");
         sshAsRoot("grep -qF \"" + escaped + "\" /home/" + user + "/.ssh/authorized_keys 2>/dev/null"
@@ -1459,8 +1664,10 @@ public class Deploy {
             echo "=== Clean complete! ==="
             """;
 
-    static void clean() throws Exception {
-        System.out.println("Cleaning up " + user + " from " + host + " ...");
+    static void clean(List<String> selected) throws Exception {
+        Target target = singleTarget(selected, "clean");
+        loadConfig(target);
+        System.out.println("Cleaning up " + user + " from " + host + " (@" + target.name() + ") ...");
 
         Path tempScript = Files.createTempFile("clean-server", ".sh");
         Files.writeString(tempScript, CLEAN_SCRIPT);
@@ -1471,22 +1678,23 @@ public class Deploy {
 
         Files.delete(tempScript);
 
-        Files.deleteIfExists(Path.of("vmhosting.conf"));
-        System.out.println("Server cleaned and vmhosting.conf removed. Run 'init' to start fresh.");
+        Files.deleteIfExists(target.path());
+        System.out.println("Server cleaned and " + target.path() + " removed. Run 'init' to start fresh.");
     }
 
     // -----------------------------------------------------------------------
     // env – manage environment variables on the server
     // -----------------------------------------------------------------------
-    static void env(String[] args) throws Exception {
+    static void env(String[] args, List<String> selected) throws Exception {
         String subcommand = args.length > 1 ? args[1] : "list";
+        List<Target> targets = resolveTargets(selected, true);
         switch (subcommand) {
-            case "list" -> envList();
-            case "set" -> envSet(args);
-            case "remove" -> envRemove(args);
+            case "list" -> forEachTarget(targets, target -> envList());
+            case "set" -> forEachTarget(targets, target -> envSet(args));
+            case "remove" -> forEachTarget(targets, target -> envRemove(args));
             default -> {
                 System.err.println("Unknown env subcommand: " + subcommand);
-                System.err.println("Usage: Deploy env [set|remove|list]");
+                System.err.println("Usage: Deploy env [set|remove|list] [@target ...]");
                 System.exit(1);
             }
         }
@@ -1650,8 +1858,7 @@ public class Deploy {
                 .start()
                 .waitFor();
         if (exit != 0) {
-            System.err.println("Command failed with exit code " + exit);
-            System.exit(exit);
+            throw new CommandFailed("Command failed with exit code " + exit + ": " + String.join(" ", cmd), exit);
         }
     }
 
@@ -1678,8 +1885,7 @@ public class Deploy {
                 .start()
                 .waitFor();
         if (exit != 0) {
-            System.err.println("Remote command failed (exit " + exit + ")");
-            System.exit(exit);
+            throw new CommandFailed("Remote command failed (exit " + exit + ")", exit);
         }
     }
 
@@ -1694,8 +1900,7 @@ public class Deploy {
         String output = new String(process.getInputStream().readAllBytes());
         int exit = process.waitFor();
         if (exit != 0) {
-            System.err.println("Remote command failed (exit " + exit + ")");
-            System.exit(exit);
+            throw new CommandFailed("Remote command failed (exit " + exit + ")", exit);
         }
         return output;
     }
