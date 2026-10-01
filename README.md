@@ -97,6 +97,8 @@ Only the host is required — sensible defaults are derived for the rest. HTTPS 
  5. Installs a **systemd service** that runs the app on boot and restarts on failure
  6. Installs **Caddy** as a reverse proxy with automatic HTTPS, and configures the app (Spring Boot or Quarkus) to trust the proxy's `X-Forwarded-*` headers so it sees real client IPs and the `https` scheme instead of `localhost` connections
 
+Re-running `init` is quick: packages that are already installed are skipped, and `apt-get update` (slow on a Pi Zero) only runs when the package lists are more than a week old — unattended-upgrades refreshes them daily — or a newly added repository needs them. An already installed Semeru of the latest release is not downloaded again.
+
 ### `Deploy deploy` (default)
 
 Builds and deploys the app. This is the default command — running `Deploy` (with no arguments is equivalent to `Deploy deploy`).

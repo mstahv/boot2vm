@@ -69,6 +69,29 @@ public class Deploy {
                 SITE_ADDR="${SITE_ADDR# }"
             fi
 
+            # Install missing packages only. 'apt-get update' is slow on small boards, so it is
+            # skipped when the package lists are less than a week old (unattended-upgrades keeps
+            # them fresh daily) and run only for unknown packages (a repository was just added)
+            # or when an install fails because the cached lists have gone stale.
+            APT_UPDATED=""
+            apt_update() {
+                if [ -z "$APT_UPDATED" ]; then apt-get update; APT_UPDATED=1; fi
+            }
+            apt_install() {
+                local missing=() p
+                for p in "$@"; do
+                    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || missing+=("$p")
+                done
+                [ ${#missing[@]} -eq 0 ] && return 0
+                if [ -z "$(find /var/lib/apt/lists -maxdepth 1 -type f -name '*Release' -mtime -7 2>/dev/null | head -n1)" ]; then
+                    apt_update
+                fi
+                for p in "${missing[@]}"; do
+                    apt-cache show "$p" >/dev/null 2>&1 || { APT_UPDATED=""; apt_update; break; }
+                done
+                apt-get install -y "${missing[@]}" || { APT_UPDATED=""; apt_update; apt-get install -y "${missing[@]}"; }
+            }
+
             echo "=== Setting up server for user '$APP_USER' with domain '$DOMAIN' ==="
 
             # Wait for any background apt/dpkg process to release the lock
@@ -80,8 +103,7 @@ public class Deploy {
 
             # 1. Automatic security updates with nightly reboot if required
             echo "--- Configuring unattended-upgrades ---"
-            apt-get update
-            apt-get install -y unattended-upgrades
+            apt_install unattended-upgrades
             cat > /etc/apt/apt.conf.d/20auto-upgrades << 'CONF'
             APT::Periodic::Update-Package-Lists "1";
             APT::Periodic::Unattended-Upgrade "1";
@@ -97,26 +119,24 @@ public class Deploy {
             echo "--- Installing JDK 25 (provider: $JDK_PROVIDER) ---"
             case "$JDK_PROVIDER" in
                 zulu)
-                    apt-get install -y gnupg ca-certificates curl
+                    apt_install gnupg ca-certificates curl
                     curl -s https://repos.azul.com/azul-repo.key | gpg --dearmor -o /usr/share/keyrings/azul.gpg
                     chmod 644 /usr/share/keyrings/azul.gpg
                     echo "deb [signed-by=/usr/share/keyrings/azul.gpg] https://repos.azul.com/zulu/deb stable main" \\
                         > /etc/apt/sources.list.d/zulu.list
-                    apt-get update
-                    apt-get install -y zulu25-jdk
+                    apt_install zulu25-jdk
                     ;;
                 temurin)
-                    apt-get install -y wget apt-transport-https gpg
+                    apt_install wget apt-transport-https gpg
                     wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
                         | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
                     echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \\
                         > /etc/apt/sources.list.d/adoptium.list
-                    apt-get update
-                    apt-get install -y temurin-25-jdk
+                    apt_install temurin-25-jdk
                     ;;
                 semeru)
                     # IBM Semeru (OpenJ9 VM) has no apt repository: install the latest GitHub release tarball
-                    apt-get install -y curl ca-certificates
+                    apt_install curl ca-certificates
                     case "$(dpkg --print-architecture)" in
                         amd64) SEMERU_ARCH=x64 ;;
                         arm64) SEMERU_ARCH=aarch64 ;;
@@ -130,16 +150,21 @@ public class Deploy {
                         echo "Could not find a Semeru 25 JDK download for $SEMERU_ARCH" >&2
                         exit 1
                     fi
-                    # The ~250 MB tarball goes to disk: /tmp is a small RAM-backed tmpfs on e.g. Raspberry Pi OS
-                    rm -f /tmp/semeru-jdk.tar.gz  # left behind by older versions of this script
-                    SEMERU_TMP="$(mktemp -d /var/tmp/semeru.XXXXXX)"
-                    trap 'rm -rf "$SEMERU_TMP"' EXIT
-                    curl -fsSL -o "$SEMERU_TMP/jdk.tar.gz" "$SEMERU_URL"
-                    echo "$(curl -fsSL "$SEMERU_URL.sha256.txt" | cut -d' ' -f1)  $SEMERU_TMP/jdk.tar.gz" | sha256sum -c -
-                    rm -rf /opt/semeru-25 && mkdir -p /opt/semeru-25
-                    tar -xzf "$SEMERU_TMP/jdk.tar.gz" -C /opt/semeru-25 --strip-components=1
-                    rm -rf "$SEMERU_TMP"
-                    trap - EXIT
+                    if [ "$(cat /opt/semeru-25/.download-url 2>/dev/null)" = "$SEMERU_URL" ]; then
+                        echo "Semeru is up to date: $SEMERU_URL"
+                    else
+                        # The ~250 MB tarball goes to disk: /tmp is a small RAM-backed tmpfs on e.g. Raspberry Pi OS
+                        rm -f /tmp/semeru-jdk.tar.gz  # left behind by older versions of this script
+                        SEMERU_TMP="$(mktemp -d /var/tmp/semeru.XXXXXX)"
+                        trap 'rm -rf "$SEMERU_TMP"' EXIT
+                        curl -fsSL -o "$SEMERU_TMP/jdk.tar.gz" "$SEMERU_URL"
+                        echo "$(curl -fsSL "$SEMERU_URL.sha256.txt" | cut -d' ' -f1)  $SEMERU_TMP/jdk.tar.gz" | sha256sum -c -
+                        rm -rf /opt/semeru-25 && mkdir -p /opt/semeru-25
+                        tar -xzf "$SEMERU_TMP/jdk.tar.gz" -C /opt/semeru-25 --strip-components=1
+                        echo "$SEMERU_URL" > /opt/semeru-25/.download-url
+                        rm -rf "$SEMERU_TMP"
+                        trap - EXIT
+                    fi
                     for tool in java javac jar jcmd jps jstack; do
                         update-alternatives --install "/usr/bin/$tool" "$tool" "/opt/semeru-25/bin/$tool" 2500
                         update-alternatives --set "$tool" "/opt/semeru-25/bin/$tool"
@@ -287,13 +312,12 @@ public class Deploy {
                 echo "--- Not a web service; skipping reverse proxy ---"
             elif [ "$PROXY" = "caddy" ]; then
                 echo "--- Installing Caddy ---"
-                apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+                apt_install debian-keyring debian-archive-keyring apt-transport-https curl
                 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \\
                     | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
                 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \\
                     > /etc/apt/sources.list.d/caddy-stable.list
-                apt-get update
-                apt-get install -y caddy
+                apt_install caddy
                 # Per-app site files allow multiple apps behind the same Caddy instance.
                 # The main Caddyfile only imports them; each app owns /etc/caddy/sites/<user>.caddy.
                 mkdir -p /etc/caddy/sites
@@ -314,7 +338,7 @@ public class Deploy {
             # 7. Configure firewall
             if [ "$FIREWALL" = "yes" ]; then
                 echo "--- Configuring firewall (ufw) ---"
-                apt-get install -y ufw
+                apt_install ufw
                 # No 'ufw reset' here — rules are added idempotently so that
                 # setting up a second app on the same server keeps existing rules.
                 ufw default deny incoming
