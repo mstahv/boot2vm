@@ -53,7 +53,7 @@ public class Deploy {
             FIREWALL="${9:-yes}"
             EXPOSE_NODES="${10:-no}"
             WEB_SERVICE="${11:-yes}"
-            JDK_PROVIDER="${12:-temurin}"  # temurin or zulu
+            JDK_PROVIDER="${12:-temurin}"  # temurin, zulu or semeru (OpenJ9)
             PORT="${13:-8080}"             # app port; blue-green green slot uses PORT+1
             JVM_OPTS="${14:-}"             # extra JVM flags, exposed to the unit as JAVA_OPTS
             USER_GROUPS="${15:-}"          # comma-separated extra groups for the app user (gpio,i2c,...)
@@ -92,7 +92,7 @@ public class Deploy {
             CONF
             systemctl enable --now unattended-upgrades
 
-            # 2. Install JDK 25 (Eclipse Adoptium / Temurin or Azul Zulu)
+            # 2. Install JDK 25 (Eclipse Adoptium / Temurin, Azul Zulu or IBM Semeru / OpenJ9)
             JDK_PROVIDER="$(printf '%s' "$JDK_PROVIDER" | tr '[:upper:]' '[:lower:]')"
             echo "--- Installing JDK 25 (provider: $JDK_PROVIDER) ---"
             case "$JDK_PROVIDER" in
@@ -114,8 +114,39 @@ public class Deploy {
                     apt-get update
                     apt-get install -y temurin-25-jdk
                     ;;
+                semeru)
+                    # IBM Semeru (OpenJ9 VM) has no apt repository: install the latest GitHub release tarball
+                    apt-get install -y curl ca-certificates
+                    case "$(dpkg --print-architecture)" in
+                        amd64) SEMERU_ARCH=x64 ;;
+                        arm64) SEMERU_ARCH=aarch64 ;;
+                        ppc64el) SEMERU_ARCH=ppc64le ;;
+                        s390x) SEMERU_ARCH=s390x ;;
+                        *) echo "Semeru has no Linux build for $(dpkg --print-architecture); use temurin or zulu." >&2; exit 1 ;;
+                    esac
+                    SEMERU_URL="$(curl -fsSL https://api.github.com/repos/ibmruntimes/semeru25-binaries/releases/latest \\
+                        | grep -o 'https://[^"]*' | grep "/ibm-semeru-open-jdk_${SEMERU_ARCH}_linux_[^/]*\\.tar\\.gz$" | head -n1)"
+                    if [ -z "$SEMERU_URL" ]; then
+                        echo "Could not find a Semeru 25 JDK download for $SEMERU_ARCH" >&2
+                        exit 1
+                    fi
+                    # The ~250 MB tarball goes to disk: /tmp is a small RAM-backed tmpfs on e.g. Raspberry Pi OS
+                    rm -f /tmp/semeru-jdk.tar.gz  # left behind by older versions of this script
+                    SEMERU_TMP="$(mktemp -d /var/tmp/semeru.XXXXXX)"
+                    trap 'rm -rf "$SEMERU_TMP"' EXIT
+                    curl -fsSL -o "$SEMERU_TMP/jdk.tar.gz" "$SEMERU_URL"
+                    echo "$(curl -fsSL "$SEMERU_URL.sha256.txt" | cut -d' ' -f1)  $SEMERU_TMP/jdk.tar.gz" | sha256sum -c -
+                    rm -rf /opt/semeru-25 && mkdir -p /opt/semeru-25
+                    tar -xzf "$SEMERU_TMP/jdk.tar.gz" -C /opt/semeru-25 --strip-components=1
+                    rm -rf "$SEMERU_TMP"
+                    trap - EXIT
+                    for tool in java javac jar jcmd jps jstack; do
+                        update-alternatives --install "/usr/bin/$tool" "$tool" "/opt/semeru-25/bin/$tool" 2500
+                        update-alternatives --set "$tool" "/opt/semeru-25/bin/$tool"
+                    done
+                    ;;
                 *)
-                    echo "Unsupported JDK_PROVIDER: '$JDK_PROVIDER'. Supported values are: temurin, zulu." >&2
+                    echo "Unsupported JDK_PROVIDER: '$JDK_PROVIDER'. Supported values are: temurin, zulu, semeru." >&2
                     exit 1
                     ;;
             esac
@@ -1058,9 +1089,9 @@ public class Deploy {
         }
         appType = prompt(console, "App type (spring-boot/quarkus/plain)",
                 defaultAppType != null ? defaultAppType : detectAppType());
-        jdkProvider = prompt(console, "JDK provider (temurin/zulu)",
+        jdkProvider = prompt(console, "JDK provider (temurin/zulu/semeru)",
                 defaultJdkProvider != null ? defaultJdkProvider : "temurin");
-        promptJvmAndHardware(console, defaultJvmOpts, defaultUserGroups);
+        promptJvmAndHardware(console, jdkProvider, defaultJvmOpts, defaultUserGroups);
         if (webService) {
             String blueGreenStr = prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
                     defaultBlueGreen != null ? defaultBlueGreen : "no");
@@ -1272,48 +1303,89 @@ public class Deploy {
 
     static final String PI_GROUPS = "gpio,i2c,spi,dialout,bluetooth,video,render,plugdev,input,audio";
 
-    static final List<Preset> PRESETS = List.of(
-            new Preset("Raspberry Pi, everything: all hardware groups below, native access, restart on OOM",
-                    PI_GROUPS, "--enable-native-access=ALL-UNNAMED -XX:+ExitOnOutOfMemoryError", "pi"),
-            new Preset("Raspberry Pi Zero / 512 MB class: as above plus serial GC, 60% heap, C1 JIT only",
-                    PI_GROUPS, "--enable-native-access=ALL-UNNAMED -XX:+ExitOnOutOfMemoryError"
-                            + " -XX:+UseSerialGC -XX:MaxRAMPercentage=60 -XX:TieredStopAtLevel=1", "pi-zero"),
-            new Preset("Raspberry Pi GPIO/I2C/SPI/PWM (Pi4J, gpiod)", "gpio,i2c,spi", "--enable-native-access=ALL-UNNAMED"),
-            new Preset("Serial ports (/dev/ttyAMA*, /dev/ttyUSB*)", "dialout", ""),
-            new Preset("Bluetooth (BlueZ over D-Bus)", "bluetooth", ""),
-            new Preset("Camera (libcamera/rpicam, V4L2)", "video,render", ""),
-            new Preset("USB, HID and input devices", "plugdev,input", ""),
-            new Preset("Audio (ALSA)", "audio", ""),
-            new Preset("Native libraries (JNI/FFM: JNA, OpenCV, SQLite ...) without JDK 24+ warnings", "", "--enable-native-access=ALL-UNNAMED"),
-            new Preset("Small device (<= 2 GB RAM): serial GC, 60% of RAM for the heap", "", "-XX:+UseSerialGC -XX:MaxRAMPercentage=60"),
-            new Preset("Faster startup on a slow CPU (C1 JIT only, lower peak throughput)", "", "-XX:TieredStopAtLevel=1"),
-            new Preset("Exit on OutOfMemoryError so systemd restarts the app", "", "-XX:+ExitOnOutOfMemoryError"),
-            new Preset("Headless AWT (image processing on a server)", "", "-Djava.awt.headless=true"));
+    /**
+     * Presets for the chosen JDK. Semeru runs the OpenJ9 VM, which silently ignores
+     * HotSpot's GC and JIT tuning flags, so the small-device and startup presets use
+     * OpenJ9's own equivalents there.
+     */
+    static List<Preset> presets(String jdkProvider) {
+        boolean openJ9 = isOpenJ9(jdkProvider);
+        String piBase = "--enable-native-access=ALL-UNNAMED -XX:+ExitOnOutOfMemoryError";
+        String smallHeap = openJ9 ? "-XX:MaxRAMPercentage=60" : "-XX:+UseSerialGC -XX:MaxRAMPercentage=60";
+        String fastStartup = openJ9 ? "-Xquickstart -Xshareclasses:name=app" : "-XX:TieredStopAtLevel=1";
+        return List.of(
+                new Preset("Raspberry Pi, everything: all hardware groups below, native access, restart on OOM",
+                        PI_GROUPS, piBase, "pi"),
+                new Preset("Raspberry Pi Zero / 512 MB class: as above plus "
+                        + (openJ9 ? "60% heap, quick-start JIT, shared class cache" : "serial GC, 60% heap, C1 JIT only"),
+                        PI_GROUPS, piBase + " " + smallHeap + " " + fastStartup, "pi-zero"),
+                new Preset("Raspberry Pi GPIO/I2C/SPI/PWM (Pi4J, gpiod)", "gpio,i2c,spi", "--enable-native-access=ALL-UNNAMED"),
+                new Preset("Serial ports (/dev/ttyAMA*, /dev/ttyUSB*)", "dialout", ""),
+                new Preset("Bluetooth (BlueZ over D-Bus)", "bluetooth", ""),
+                new Preset("Camera (libcamera/rpicam, V4L2)", "video,render", ""),
+                new Preset("USB, HID and input devices", "plugdev,input", ""),
+                new Preset("Audio (ALSA)", "audio", ""),
+                new Preset("Native libraries (JNI/FFM: JNA, OpenCV, SQLite ...) without JDK 24+ warnings", "", "--enable-native-access=ALL-UNNAMED"),
+                new Preset("Small device (<= 2 GB RAM): "
+                        + (openJ9 ? "60% of RAM for the heap (OpenJ9 default is 25%)" : "serial GC, 60% of RAM for the heap"),
+                        "", smallHeap),
+                new Preset("Faster startup on a slow CPU ("
+                        + (openJ9 ? "quick-start JIT and shared class/AOT cache" : "C1 JIT only")
+                        + ", lower peak throughput)", "", fastStartup),
+                new Preset("Exit on OutOfMemoryError so systemd restarts the app", "", "-XX:+ExitOnOutOfMemoryError"),
+                new Preset("Headless AWT (image processing on a server)", "", "-Djava.awt.headless=true"));
+    }
+
+    static boolean isOpenJ9(String jdkProvider) {
+        return "semeru".equalsIgnoreCase(jdkProvider);
+    }
+
+    /**
+     * Whether the flag only works on the other VM. HotSpot refuses to start with
+     * OpenJ9 -X options; OpenJ9 silently ignores HotSpot GC/JIT flags.
+     */
+    static boolean isForOtherVm(String flag, boolean openJ9) {
+        boolean openJ9Only = flag.startsWith("-Xquickstart") || flag.startsWith("-Xshareclasses")
+                || flag.startsWith("-Xgcpolicy") || flag.startsWith("-Xtune") || flag.startsWith("-Xjit")
+                || flag.startsWith("-Xaot") || flag.startsWith("-Xscmx");
+        boolean hotSpotOnly = flag.matches("-XX:[+-]Use\\w*GC") || flag.startsWith("-XX:TieredStopAtLevel");
+        return openJ9 ? hotSpotOnly : openJ9Only;
+    }
 
     /**
      * Ask for extra JVM options and extra Linux groups for the app user. Common
      * use cases (Raspberry Pi hardware access, small devices, ...) can be picked
      * from a list; the merged result is then shown for manual editing.
      */
-    static void promptJvmAndHardware(Console console, String defaultJvmOpts, String defaultUserGroups) {
+    static void promptJvmAndHardware(Console console, String jdkProvider, String defaultJvmOpts, String defaultUserGroups) {
         boolean hasPrevious = (defaultJvmOpts != null && !defaultJvmOpts.isBlank())
                 || (defaultUserGroups != null && !defaultUserGroups.isBlank());
         jvmOpts = defaultJvmOpts != null ? defaultJvmOpts.trim() : "";
         userGroups = defaultUserGroups != null ? defaultUserGroups.trim() : "";
+
+        boolean openJ9 = isOpenJ9(jdkProvider);
+        var opts = new LinkedHashSet<String>();
+        if (!jvmOpts.isEmpty()) opts.addAll(List.of(jvmOpts.split("\\s+")));
+        var dropped = opts.stream().filter(o -> isForOtherVm(o, openJ9)).toList();
+        if (!dropped.isEmpty()) {
+            opts.removeAll(dropped);
+            jvmOpts = String.join(" ", opts);
+            System.out.println("  Dropped JVM options for " + (openJ9 ? "HotSpot" : "OpenJ9") + " that " + jdkProvider
+                    + " does not support: " + String.join(" ", dropped) + " (pick the presets again for equivalents)");
+        }
 
         String tune = prompt(console, "Configure hardware access / JVM options (yes/no)", hasPrevious ? "yes" : "no");
         if (!"yes".equalsIgnoreCase(tune)) {
             return;
         }
 
-        var opts = new LinkedHashSet<String>();
-        if (!jvmOpts.isEmpty()) opts.addAll(List.of(jvmOpts.split("\\s+")));
+        var presets = presets(jdkProvider);
         var groups = new LinkedHashSet<String>();
         if (!userGroups.isEmpty()) groups.addAll(List.of(userGroups.split("\\s*,\\s*")));
 
         System.out.println("Presets (groups are added to the app user, flags to the java command line):");
-        for (int i = 0; i < PRESETS.size(); i++) {
-            Preset preset = PRESETS.get(i);
+        for (int i = 0; i < presets.size(); i++) {
+            Preset preset = presets.get(i);
             var details = new ArrayList<String>();
             if (!preset.groups().isEmpty()) details.add("groups: " + preset.groups());
             if (!preset.jvmOpts().isEmpty()) details.add(preset.jvmOpts());
@@ -1326,9 +1398,9 @@ public class Deploy {
             boolean ok = true;
             for (String token : picked.split("\\s*[,\\s]\\s*")) {
                 if (token.isEmpty()) continue;
-                Preset preset = findPreset(token);
+                Preset preset = findPreset(presets, token);
                 if (preset == null) {
-                    System.err.println("  '" + token + "' is not a preset number between 1 and " + PRESETS.size() + " or a preset name");
+                    System.err.println("  '" + token + "' is not a preset number between 1 and " + presets.size() + " or a preset name");
                     ok = false;
                     break;
                 }
@@ -1349,12 +1421,12 @@ public class Deploy {
                 .replaceAll("\\s*,\\s*", ",").trim();
     }
 
-    static Preset findPreset(String token) {
+    static Preset findPreset(List<Preset> presets, String token) {
         if (token.matches("\\d+")) {
             int idx = Integer.parseInt(token) - 1;
-            return idx >= 0 && idx < PRESETS.size() ? PRESETS.get(idx) : null;
+            return idx >= 0 && idx < presets.size() ? presets.get(idx) : null;
         }
-        return PRESETS.stream()
+        return presets.stream()
                 .filter(p -> token.equalsIgnoreCase(p.alias()))
                 .findFirst().orElse(null);
     }

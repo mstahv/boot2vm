@@ -84,14 +84,14 @@ Admin SSH user [root]:
 HTTPS (yes/no/internal) [yes]:
 Reverse proxy (caddy/none) [caddy]:
 App type (spring-boot/quarkus/plain) [spring-boot]:
-JDK provider (temurin/zulu) [temurin]:
+JDK provider (temurin/zulu/semeru) [temurin]:
 Configure hardware access / JVM options (yes/no) [no]:
 ```
 
 Only the host is required — sensible defaults are derived for the rest. HTTPS defaults to `no` when the domain is a LAN address a public CA cannot issue a certificate for, such as `raspberrypi.local`, a bare hostname or an IP; for those pick `internal` if you need HTTPS (see *Local HTTPS for a PWA* below). Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
 
  1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot when required
- 2. Installs **JDK 25** (Eclipse Adoptium / Temurin)
+ 2. Installs **JDK 25** (Eclipse Adoptium / Temurin by default; Azul Zulu, or IBM Semeru with the [OpenJ9](https://eclipse.dev/openj9/) VM instead of HotSpot — often a smaller memory footprint. Semeru is installed from its GitHub release tarball into `/opt/semeru-25` and has no 32-bit ARM build)
  3. Creates the app user with SSH authorized key copied from the admin user
  4. Creates the working directory `/home/$USER/app`
  5. Installs a **systemd service** that runs the app on boot and restarts on failure
@@ -219,6 +219,8 @@ Extra groups for the app user (comma-separated) [gpio,i2c,spi,dialout]:
 ```
 
 For the lazy: type `pi` for a Raspberry Pi with all hardware groups, or `pi-zero` for a Pi Zero 2 W and other 512 MB class boards, where the JVM is additionally tuned for a small and slow machine.
+
+The presets follow the JDK chosen just before them. With `semeru` the JVM is OpenJ9, which silently ignores HotSpot's `-XX:+UseSerialGC` and `-XX:TieredStopAtLevel=1`, so the small-device and startup presets use OpenJ9's own options instead: `-XX:MaxRAMPercentage=60` (OpenJ9 defaults to only 25% of RAM for the heap), `-Xquickstart` and `-Xshareclasses:name=app`, a class and AOT code cache in the app user's `~/.cache/javasharedresources` that makes later starts faster. When you re-run `init` with a different JDK, flags from the previous `JVM_OPTS` that only the other VM supports are dropped (HotSpot refuses to start with OpenJ9's `-X` options), and you can pick the presets again to get the equivalents.
 
 The result is stored in `vmhosting.conf`:
 
