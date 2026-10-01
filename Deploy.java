@@ -1016,10 +1016,11 @@ public class Deploy {
             try (var reader = Files.newBufferedReader(defaultsPath)) {
                 props.load(reader);
             }
-            // Never suggest another server's host as the default for a new target
-            defaultHost = defaultsPath.equals(configPath) ? props.getProperty("HOST") : null;
+            // Never suggest another server's host or domains as the default for a new target
+            boolean ownConfig = defaultsPath.equals(configPath);
+            defaultHost = ownConfig ? props.getProperty("HOST") : null;
             defaultUser = props.getProperty("USER");
-            defaultDomain = props.getProperty("DOMAIN");
+            defaultDomain = ownConfig ? props.getProperty("DOMAIN") : null;
             defaultKey = props.getProperty("SSH_KEY");
             defaultAdmin = props.getProperty("ADMIN_USER");
             defaultHttps = props.getProperty("HTTPS");

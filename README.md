@@ -174,7 +174,7 @@ Each server is a *target* with its own config file: `vmhosting.conf` is `@defaul
 
 ```bash
 Deploy init @cloud               # first server can be named right away (plain 'init' asks for a name too)
-Deploy init @pi2                 # add a server; defaults come from the existing config, so mostly just type the host
+Deploy init @pi2                 # add a server; defaults come from the existing config except host and domains (domain defaults to the host)
 Deploy init @pi3 --from @pi2     # ... or copy the defaults from another target
 Deploy targets                   # list servers
 Deploy                           # build once, then deploy to every target in order
