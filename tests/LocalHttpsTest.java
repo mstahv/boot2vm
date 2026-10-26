@@ -1,8 +1,11 @@
+package boot2vm;
+
 import java.nio.file.*;
 import java.util.*;
 
-/** Run with javac -d /tmp/boot2vm-tests Deploy.java tests/LocalHttpsTest.java,
- * then java -cp /tmp/boot2vm-tests LocalHttpsTest. No SSH or provisioning. */
+/** Run with CP=$(jbang info classpath Deploy.java),
+ * javac -cp "$CP" -d /tmp/boot2vm-tests Deploy.java tests/LocalHttpsTest.java,
+ * then java -cp "/tmp/boot2vm-tests:$CP" boot2vm.LocalHttpsTest. No SSH or provisioning. */
 public class LocalHttpsTest {
     static void require(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);

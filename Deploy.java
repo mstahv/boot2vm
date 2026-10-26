@@ -1,10 +1,50 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 
-//JAVA 17+
+//JAVA 25+
+//DEPS in.virit.ws:jbang-starter:25.2.1
+
+package boot2vm;
+
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.button.Button;
+import com.vaadin.flow.component.button.ButtonVariant;
+import com.vaadin.flow.component.checkbox.Checkbox;
+import com.vaadin.flow.component.checkbox.CheckboxGroup;
+import com.vaadin.flow.component.combobox.ComboBox;
+import com.vaadin.flow.component.formlayout.FormLayout;
+import com.vaadin.flow.component.html.Div;
+import com.vaadin.flow.component.html.H2;
+import com.vaadin.flow.component.html.H3;
+import com.vaadin.flow.component.html.Paragraph;
+import com.vaadin.flow.component.html.Span;
+import com.vaadin.flow.component.notification.Notification;
+import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
+import com.vaadin.flow.component.orderedlayout.VerticalLayout;
+import com.vaadin.flow.component.select.Select;
+import com.vaadin.flow.component.textfield.TextArea;
+import com.vaadin.flow.component.textfield.TextField;
+import com.vaadin.flow.router.PageTitle;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.server.ServiceInitEvent;
+import com.vaadin.flow.theme.aura.Aura;
+import com.vaadin.open.Open;
+import in.virit.widgetset.jbang.ViritinJBangAutoconfiguration;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.server.context.WebServerInitializedEvent;
+import org.springframework.context.event.EventListener;
+import org.vaadin.firitin.form.FormBinder;
 
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 public class Deploy {
 
@@ -847,6 +887,7 @@ public class Deploy {
         System.out.println();
         System.out.println("Commands:");
         System.out.println("  init           - Set up the server (run once); 'init @name [--from @other]' adds another server");
+        System.out.println("                   Opens a form in the browser; --tui (or BOOT2VM_TUI=1) asks in the terminal");
         System.out.println("  deploy         - Build once, then sync and restart on every target (or the given @targets)");
         System.out.println("  targets        - List the configured servers");
         System.out.println("  logs [n] [slot] - Tail the application logs (default: 200 lines)");
@@ -1004,7 +1045,14 @@ public class Deploy {
         // additions leave no anonymous "default" whose host nobody remembers.
         boolean askName = selected.isEmpty() && allTargets().isEmpty();
 
-        InitResult result = promptInit(targetName, askName, from);
+        InitResult result;
+        String noGui = tui ? null : guiUnavailableReason();
+        if (tui || noGui != null) {
+            if (noGui != null) System.out.println(noGui + ", using the terminal UI.");
+            result = promptInit(targetName, askName, from);
+        } else {
+            result = InitGui.run(targetName, askName, from);
+        }
         runInit(result.target(), result.config());
     }
 
@@ -1300,16 +1348,18 @@ public class Deploy {
             if (host == null || host.isBlank()) errors.put("host", "Host is required");
             else if (host.contains(",") || host.matches(".*\\s.*"))
                 errors.put("host", "Host must be a single hostname or IP; put additional domains in Domain(s)");
-            if (user == null || !user.matches("[a-z_][a-z0-9_-]{0,31}"))
+            // Blank user, domain and HTTPS get values derived from the host, see fillHostDerived()
+            String u = user == null || user.isBlank() ? derivedUser() : user;
+            if (u == null || !u.matches("[a-z_][a-z0-9_-]{0,31}"))
                 errors.put("user", "App user must be a Linux user name: lowercase letters, digits, '-' and '_'");
             if (sshKey == null || sshKey.isBlank()) errors.put("sshKey", "SSH public key is required");
             if (adminUser == null || adminUser.isBlank()) errors.put("adminUser", "Admin SSH user is required");
             if (!APP_TYPES.contains(appType)) errors.put("appType", "App type must be one of " + APP_TYPES);
             if (!JDK_PROVIDERS.contains(jdkProvider)) errors.put("jdkProvider", "JDK provider must be one of " + JDK_PROVIDERS);
             if (webService) {
-                if (domain == null || domain.isBlank()) errors.put("domain", "At least one domain is required");
-                if (!HTTPS_MODES.contains(https)) errors.put("https", "HTTPS must be yes, no or internal");
-                else if ("internal".equals(https) && !"caddy".equals(proxy))
+                String h = https == null || https.isBlank() ? derivedHttps() : https.trim().toLowerCase(Locale.ROOT);
+                if (!HTTPS_MODES.contains(h)) errors.put("https", "HTTPS must be yes, no or internal");
+                else if ("internal".equals(h) && !"caddy".equals(proxy))
                     errors.put("https", "HTTPS internal requires Caddy as the reverse proxy");
                 if (!PROXIES.contains(proxy)) errors.put("proxy", "Reverse proxy must be caddy or none");
                 if (!isPort(port)) errors.put("port", "App port must be a number between 1 and 65535");
@@ -1323,7 +1373,7 @@ public class Deploy {
             }
             if (jvmOpts != null && jvmOpts.contains("\""))
                 errors.put("jvmOpts", "Double quotes are not supported in JVM options (the value is written into a quoted systemd Environment= line)");
-            if (userGroups != null && !userGroups.matches("[a-z0-9_,-]*"))
+            if (userGroups != null && !userGroups.matches("[a-z0-9_,\\s-]*"))
                 errors.put("userGroups", "Groups must be comma-separated Linux group names");
             for (String line : envLines()) {
                 if (!line.matches("[A-Za-z_][A-Za-z0-9_]*=.*")) {
@@ -1443,6 +1493,522 @@ public class Deploy {
         public void setFirewall(boolean firewall) { this.firewall = firewall; }
         public boolean isExposeNodes() { return exposeNodes; }
         public void setExposeNodes(boolean exposeNodes) { this.exposeNodes = exposeNodes; }
+    }
+
+    // -----------------------------------------------------------------------
+    // init GUI – the same settings as a form in the browser
+    // -----------------------------------------------------------------------
+
+    /** Why the browser form cannot be used here, or null when it can. */
+    static String guiUnavailableReason() {
+        if (System.getenv("SSH_CONNECTION") != null || System.getenv("SSH_TTY") != null) {
+            return "Running over SSH";
+        }
+        boolean linux = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("linux");
+        if (linux && System.getenv("DISPLAY") == null && System.getenv("WAYLAND_DISPLAY") == null) {
+            return "No graphical display found";
+        }
+        return null;
+    }
+
+    /**
+     * Runs the init form as a local Spring Boot app on a random port and opens it
+     * in the browser. The form only collects the settings: provisioning runs in
+     * the terminal as before, once the form is submitted and the server is closed.
+     */
+    @SpringBootApplication(exclude = ViritinJBangAutoconfiguration.class)
+    public static class InitGui {
+        static String initialTarget, from;
+        static boolean askName;
+        static final CompletableFuture<InitResult> result = new CompletableFuture<>();
+        static final Set<UI> windows = ConcurrentHashMap.newKeySet();
+        /** Seconds between heartbeats of an open window, and silence after which init gives up. */
+        static final int HEARTBEAT = 5, GIVE_UP = 30;
+
+        static InitResult run(String targetName, boolean askName, String from) throws Exception {
+            InitGui.initialTarget = targetName;
+            InitGui.askName = askName;
+            InitGui.from = from;
+            System.out.println("Opening the init form in your browser (add --tui to answer in the terminal instead) ...");
+            var context = new SpringApplicationBuilder(InitGui.class).logStartupInfo(false)
+                    .properties("vaadin.heartbeatInterval=" + HEARTBEAT).run();
+            // The browser doesn't say when its window closes, but its heartbeats stop
+            var watchdog = Executors.newSingleThreadScheduledExecutor();
+            watchdog.scheduleWithFixedDelay(() -> {
+                long now = System.currentTimeMillis();
+                if (!windows.isEmpty() && windows.stream().allMatch(ui ->
+                        now - ui.getInternals().getLastHeartbeatTimestamp() > GIVE_UP * 1000L)) {
+                    System.out.println("The init form window was closed");
+                    result.cancel(false);
+                }
+            }, HEARTBEAT, HEARTBEAT, TimeUnit.SECONDS);
+            try {
+                return result.get();
+            } catch (CancellationException e) {
+                throw new CommandFailed("Init cancelled, nothing was written", 1);
+            } finally {
+                watchdog.shutdownNow();
+                Thread.sleep(500); // let the last response reach the browser
+                context.close();
+            }
+        }
+
+        @EventListener
+        void serverStarted(WebServerInitializedEvent event) {
+            String url = "http://localhost:" + event.getWebServer().getPort();
+            System.out.println("Init form at " + url + " (closing the window cancels init after " + GIVE_UP + " seconds)");
+            try {
+                Open.open(url);
+            } catch (Exception e) {
+                System.out.println("Could not open a browser, open the address above manually");
+            }
+        }
+
+        @EventListener
+        void serviceInit(ServiceInitEvent event) {
+            event.getSource().addUIInitListener(uiInit -> {
+                UI ui = uiInit.getUI();
+                ui.getPage().addStyleSheet(Aura.STYLESHEET);
+                ui.addClassNames("aura-accent-purple", "aura-surface");
+                // The form is taller than the window: let the page background grow with it
+                ui.getStyle().setHeight("auto").setMinHeight("100vh");
+                windows.add(ui);
+                ui.addDetachListener(detach -> windows.remove(ui));
+            });
+        }
+    }
+
+    @Route("")
+    @PageTitle("boot2vm init")
+    public static class InitView extends VerticalLayout {
+        final TargetSection target = new TargetSection();
+        final ServerSection server = new ServerSection();
+        final AppSection app = new AppSection();
+        final WebSection web = new WebSection();
+        final HardwareSection hardware = new HardwareSection(this::config);
+        final BlueGreenSection blueGreen = new BlueGreenSection();
+        final FirewallSection firewall = new FirewallSection();
+        final EnvSection env = new EnvSection();
+        final Div errors = new Div();
+        final FormBinder<InitConfig> binder = new FormBinder<>(InitConfig.class,
+                server, app, web, hardware, blueGreen, firewall, env);
+        boolean submitted;
+
+        public InitView() throws IOException {
+            setMaxWidth("52rem");
+            getStyle().setMargin("0 auto");
+            add(new H2("Set up a server for " + Path.of("").toAbsolutePath().getFileName()));
+            add(target, server, app, web, hardware, blueGreen, firewall, env, errors, new Buttons());
+
+            binder.setClassLevelViolationDisplay(errors);
+            binder.addValueChangeListener(e -> refresh());
+            app.jdkProvider.addValueChangeListener(e -> {
+                if (e.isFromClient()) hardware.jdkChanged();
+            });
+            target.defaultsFrom.addValueChangeListener(e -> {
+                if (e.isFromClient()) loadDefaults(e.getValue());
+            });
+            target.name.addValueChangeListener(e -> target.validateName());
+
+            Target initial = Target.named(InitGui.initialTarget);
+            Path source = defaultsSource(initial, InitGui.from);
+            target.setTargets(initial, source);
+            edit(initDefaults(initial, source));
+        }
+
+        InitConfig config() {
+            return binder.getValue();
+        }
+
+        void edit(InitConfig config) {
+            server.addKeyOption(config.getSshKey());
+            binder.setValue(config);
+            hardware.configChanged();
+            refresh();
+        }
+
+        /** Switch the "start from" target, keeping what identifies this server. */
+        void loadDefaults(Target source) {
+            try {
+                Target own = target.target();
+                InitConfig current = config();
+                InitConfig loaded = initDefaults(own, source == null ? null : source.path());
+                if (source == null || !source.equals(own)) {
+                    loaded.setHost(current.getHost());
+                    loaded.setDomain(current.getDomain());
+                    loaded.setHttps(current.getHttps());
+                }
+                loaded.setEnv(current.getEnv());
+                edit(loaded);
+            } catch (IOException ex) {
+                Notification.show("Could not read " + source.path() + ": " + ex.getMessage());
+            }
+        }
+
+        /** Show what applies to the current choices, and the values blank fields will get. */
+        void refresh() {
+            InitConfig c = config();
+            server.update(c);
+            app.update(c);
+            web.update(c);
+            hardware.update(c);
+            blueGreen.update(c);
+            firewall.update(c);
+            if (submitted) binder.setRawConstraintViolations(c.validate());
+        }
+
+        void submit() {
+            submitted = true;
+            InitConfig c = config();
+            c.fillHostDerived();
+            c.normalize();
+            binder.setValue(c);
+            refresh();
+            var problems = c.validate();
+            binder.setRawConstraintViolations(problems);
+            if (!problems.isEmpty() || !target.validateName()) {
+                Notification.show("Check the highlighted fields");
+                return;
+            }
+            Target t = target.target();
+            removeAll();
+            add(new H2("Setting up " + c.getHost()));
+            add(new Paragraph("The settings go to " + t.path() + " and the server setup continues in the terminal. "
+                    + "You can close this window."));
+            InitGui.result.complete(new InitResult(t, c));
+        }
+
+        class Buttons extends HorizontalLayout {
+            Buttons() {
+                var initialize = new Button("Initialize server", e -> submit());
+                initialize.addThemeVariants(ButtonVariant.PRIMARY);
+                add(initialize, new Button("Cancel", e -> {
+                    InitGui.result.cancel(false);
+                    InitView.this.removeAll();
+                    InitView.this.add(new H2("Init cancelled"), new Paragraph("Nothing was written. You can close this window."));
+                }));
+            }
+        }
+    }
+
+    /** A titled part of the init form. Subclasses declare fields named after InitConfig properties. */
+    static class FormSection extends VerticalLayout {
+        final FormLayout form = new FormLayout();
+
+        FormSection(String title, String description) {
+            setPadding(false);
+            add(new H3(title));
+            if (description != null) add(new Paragraph(description));
+            add(form);
+        }
+
+        /** Show the parts that apply to the current values. */
+        void update(InitConfig config) {
+        }
+    }
+
+    static class TargetSection extends FormSection {
+        final TextField name = new TextField("Target name");
+        final Select<Target> defaultsFrom = new Select<>();
+        Target fixed;
+
+        TargetSection() {
+            super("Target", null);
+            name.setHelperText("Used as @name in later commands; 'default' writes plain vmhosting.conf");
+            defaultsFrom.setLabel("Start from the settings of");
+            defaultsFrom.setEmptySelectionAllowed(true);
+            defaultsFrom.setEmptySelectionCaption("Built-in defaults");
+            defaultsFrom.setItemLabelGenerator(t -> t == null ? "Built-in defaults" : "@" + t.name() + " (" + t.path() + ")");
+            defaultsFrom.setHelperText("Host and domains are never taken from another server");
+        }
+
+        void setTargets(Target initial, Path source) throws IOException {
+            List<Target> existing = allTargets();
+            if (InitGui.askName) {
+                name.setValue(initial.name());
+                form.add(name);
+            } else {
+                fixed = initial;
+                form.add(new Span("@" + initial.name() + " (" + initial.path()
+                        + (Files.exists(initial.path()) ? ", re-initializing" : ", new") + ")"));
+            }
+            if (!existing.isEmpty()) {
+                defaultsFrom.setItems(existing);
+                defaultsFrom.setValue(existing.stream().filter(t -> t.path().equals(source)).findFirst().orElse(null));
+                form.add(defaultsFrom);
+            }
+        }
+
+        Target target() {
+            return fixed != null ? fixed : Target.named(name.getValue().trim());
+        }
+
+        boolean validateName() {
+            boolean valid = fixed != null || isValidTargetName(name.getValue().trim());
+            name.setInvalid(!valid);
+            name.setErrorMessage(valid ? null : "Use only letters, digits, '-' and '_'");
+            return valid;
+        }
+    }
+
+    static class ServerSection extends FormSection {
+        final TextField host = new TextField("Host");
+        final TextField adminUser = new TextField("Admin SSH user");
+        final ComboBox<String> sshKey = new ComboBox<>("SSH public key");
+        final List<String> keys = new ArrayList<>();
+
+        ServerSection() throws IOException {
+            super("Server", "How to reach the server over SSH.");
+            host.setHelperText("SSH address: a single hostname or IP; more domains can be given below");
+            adminUser.setHelperText("root, or a user with sudo");
+            keys.addAll(listSshKeys());
+            sshKey.setItems(keys);
+            sshKey.setAllowCustomValue(true);
+            sshKey.setHelperText("Installed for the app user too; pick one from ~/.ssh or type a path");
+            sshKey.addCustomValueSetListener(e -> {
+                addKeyOption(e.getDetail());
+                sshKey.setValue(e.getDetail());
+            });
+            form.add(host, adminUser, sshKey);
+        }
+
+        void addKeyOption(String key) {
+            if (key != null && !key.isBlank() && !keys.contains(key)) {
+                keys.add(key);
+                sshKey.setItems(keys);
+            }
+        }
+
+        @Override
+        void update(InitConfig config) {
+            // A typed key path is set programmatically, which the binder ignores
+            if (sshKey.getValue() != null && !sshKey.getValue().equals(config.getSshKey())) {
+                config.setSshKey(sshKey.getValue());
+            }
+        }
+    }
+
+    static class AppSection extends FormSection {
+        final TextField user = new TextField("App user");
+        final Select<String> appType = new Select<>();
+        final Select<String> jdkProvider = new Select<>();
+
+        AppSection() {
+            super("App", null);
+            user.setHelperText("The Linux user the app runs as, also the name of its service");
+            appType.setLabel("App type");
+            appType.setItems(InitConfig.APP_TYPES);
+            jdkProvider.setLabel("JDK");
+            jdkProvider.setItems(InitConfig.JDK_PROVIDERS);
+            jdkProvider.setItemLabelGenerator(jdk -> switch (jdk) {
+                case "temurin" -> "Eclipse Temurin";
+                case "zulu" -> "Azul Zulu";
+                case "semeru" -> "IBM Semeru (OpenJ9 VM, smaller memory footprint)";
+                default -> jdk;
+            });
+            form.add(user, appType, jdkProvider);
+        }
+
+        @Override
+        void update(InitConfig config) {
+            user.setPlaceholder(config.derivedUser());
+        }
+    }
+
+    static class WebSection extends FormSection {
+        final Checkbox webService = new Checkbox("Exposes web endpoints");
+        final TextField domain = new TextField("Domain(s)");
+        final Select<String> https = new Select<>();
+        final Select<String> proxy = new Select<>();
+        final TextField port = new TextField("App port");
+
+        WebSection() {
+            super("Web", null);
+            webService.setTooltipText("Uncheck for headless services: no reverse proxy, no 80/443 firewall rules");
+            domain.setHelperText("Comma-separated; Caddy serves them all");
+            https.setLabel("HTTPS");
+            https.setItems(InitConfig.HTTPS_MODES);
+            https.setEmptySelectionAllowed(true);
+            https.setItemLabelGenerator(mode -> mode == null ? "Automatic" : switch (mode) {
+                case "yes" -> "Yes, with a public certificate";
+                case "no" -> "No, plain HTTP";
+                case "internal" -> "Internal CA (LAN devices, PWAs)";
+                default -> mode;
+            });
+            proxy.setLabel("Reverse proxy");
+            proxy.setItems(InitConfig.PROXIES);
+            port.setHelperText("Unique per app on the server; blue-green also uses port + 1");
+            form.add(webService, domain, https, proxy, port);
+            form.setColspan(webService, 2);
+        }
+
+        @Override
+        void update(InitConfig config) {
+            boolean web = config.isWebService();
+            domain.setVisible(web);
+            https.setVisible(web);
+            proxy.setVisible(web);
+            port.setVisible(web);
+            domain.setPlaceholder(config.getHost());
+            https.setEmptySelectionCaption("Automatic: " + ("yes".equals(config.derivedHttps())
+                    ? "public certificate" : "plain HTTP for a LAN address"));
+        }
+    }
+
+    /** JVM flags and Linux groups, with presets that tick on when their values are present. */
+    static class HardwareSection extends FormSection {
+        final CheckboxGroup<Preset> presets = new CheckboxGroup<>("Presets");
+        final TextField jvmOpts = new TextField("Extra JVM options");
+        final TextField userGroups = new TextField("Extra groups for the app user");
+        final Supplier<InitConfig> config;
+
+        HardwareSection(Supplier<InitConfig> config) {
+            super("Hardware access and JVM options",
+                    "Groups are added to the app user, flags to the java command line.");
+            this.config = config;
+            presets.setItemLabelGenerator(Preset::label);
+            presets.addValueChangeListener(e -> {
+                if (e.isFromClient()) presetsPicked(e.getOldValue(), e.getValue());
+            });
+            jvmOpts.setHelperText("Space-separated");
+            userGroups.setHelperText("Comma-separated");
+            form.add(presets, 2);
+            form.add(withClear(jvmOpts), withClear(userGroups));
+        }
+
+        HorizontalLayout withClear(TextField field) {
+            var clear = new Button("Clear", e -> {
+                field.clear();
+                // Programmatic changes don't reach the bean through the binder
+                if (field == jvmOpts) config.get().setJvmOpts("");
+                else config.get().setUserGroups("");
+                update(config.get());
+            });
+            clear.addThemeVariants(ButtonVariant.TERTIARY);
+            var row = new HorizontalLayout(field, clear);
+            row.setAlignItems(Alignment.BASELINE);
+            row.setFlexGrow(1, field);
+            return row;
+        }
+
+        void configChanged() {
+            presets.setItems(presets(config.get().getJdkProvider()));
+            update(config.get());
+        }
+
+        void jdkChanged() {
+            InitConfig c = config.get();
+            boolean openJ9 = isOpenJ9(c.getJdkProvider());
+            var opts = tokens(c.getJvmOpts(), "\\s+");
+            var dropped = dropOtherVmOptions(opts, openJ9);
+            if (!dropped.isEmpty()) {
+                c.setJvmOpts(String.join(" ", opts));
+                jvmOpts.setValue(c.getJvmOpts());
+                Notification.show("Dropped JVM options " + c.getJdkProvider() + " does not support: "
+                        + String.join(" ", dropped) + ". Pick the presets again for equivalents.");
+            }
+            configChanged();
+        }
+
+        void presetsPicked(Set<Preset> before, Set<Preset> after) {
+            InitConfig c = config.get();
+            var opts = tokens(c.getJvmOpts(), "\\s+");
+            var groups = tokens(c.getUserGroups(), "[\\s,]+");
+            for (Preset p : after) {
+                if (before.contains(p)) continue;
+                opts.addAll(tokens(p.jvmOpts(), "\\s+"));
+                groups.addAll(tokens(p.groups(), ","));
+            }
+            for (Preset p : before) {
+                if (after.contains(p)) continue;
+                // Unticking removes exactly what the preset adds; presets that needed some of it untick too
+                opts.removeAll(tokens(p.jvmOpts(), "\\s+"));
+                groups.removeAll(tokens(p.groups(), ","));
+            }
+            c.setJvmOpts(String.join(" ", opts));
+            c.setUserGroups(String.join(",", groups));
+            jvmOpts.setValue(c.getJvmOpts());
+            userGroups.setValue(c.getUserGroups());
+            update(c);
+        }
+
+        @Override
+        void update(InitConfig c) {
+            var opts = tokens(c.getJvmOpts(), "\\s+");
+            var groups = tokens(c.getUserGroups(), "[\\s,]+");
+            var ticked = presets.getListDataView().getItems().filter(p -> {
+                var needOpts = tokens(p.jvmOpts(), "\\s+");
+                var needGroups = tokens(p.groups(), ",");
+                return !(needOpts.isEmpty() && needGroups.isEmpty())
+                        && opts.containsAll(needOpts) && groups.containsAll(needGroups);
+            }).collect(Collectors.toSet());
+            if (!ticked.equals(presets.getValue())) presets.setValue(ticked);
+        }
+
+        static LinkedHashSet<String> tokens(String value, String separator) {
+            var set = new LinkedHashSet<String>();
+            if (value == null) return set;
+            for (String token : value.trim().split(separator)) {
+                if (!token.isBlank()) set.add(token.trim());
+            }
+            return set;
+        }
+    }
+
+    static class BlueGreenSection extends FormSection {
+        final Checkbox blueGreen = new Checkbox("Blue-green deployment");
+        final Checkbox gracefulDrain = new Checkbox("Graceful drain");
+        final TextField slotCookie = new TextField("Slot cookie name");
+        final TextField drainTimeout = new TextField("Drain timeout (seconds)");
+        final TextField managementPort = new TextField("Management port");
+        final TextField notifyPath = new TextField("Notify path");
+        final TextField activeUsersPath = new TextField("Active users path");
+
+        BlueGreenSection() {
+            super("Zero-downtime deployment", null);
+            blueGreen.setTooltipText("Starts the new version next to the old one; needs memory for two JVMs, not recommended for low-end servers");
+            gracefulDrain.setTooltipText("Keeps existing sessions on the old version until they end or the drain timeout passes");
+            managementPort.setHelperText("Blank for the app port");
+            form.add(blueGreen, gracefulDrain, slotCookie, drainTimeout, managementPort, notifyPath, activeUsersPath);
+        }
+
+        @Override
+        void update(InitConfig c) {
+            setVisible(c.isWebService());
+            gracefulDrain.setVisible(c.isBlueGreen());
+            for (var field : List.of(slotCookie, drainTimeout, managementPort, notifyPath, activeUsersPath)) {
+                field.setVisible(c.isBlueGreen() && c.isGracefulDrain());
+            }
+        }
+    }
+
+    static class FirewallSection extends FormSection {
+        final Checkbox firewall = new Checkbox("Configure the firewall with ufw");
+        final Checkbox exposeNodes = new Checkbox();
+
+        FirewallSection() {
+            super("Firewall", null);
+            form.add(firewall, exposeNodes);
+        }
+
+        @Override
+        void update(InitConfig c) {
+            exposeNodes.setVisible(c.isFirewall() && c.isWebService());
+            int p = InitConfig.isPort(c.getPort()) ? Integer.parseInt(c.getPort().trim()) : 8080;
+            exposeNodes.setLabel("Open app port " + (c.isBlueGreen() ? p + "/" + (p + 1) : String.valueOf(p)) + " for direct access");
+        }
+    }
+
+    static class EnvSection extends FormSection {
+        final TextArea env = new TextArea("Environment variables");
+
+        EnvSection() {
+            super("Environment", "Stored on the server only, never in the local config file.");
+            env.setPlaceholder("KEY=VALUE, one per line");
+            env.setHelperText("Values with spaces must be quoted: KEY=\"value with spaces\"");
+            env.setWidthFull();
+            form.add(env, 2);
+        }
     }
 
     static String prompt(Console console, String label, String defaultValue) {
