@@ -42,6 +42,24 @@ jbang https://github.com/mstahv/boot2vm/blob/main/Deploy.java <command>
 
  * A Debian-based server (Ubuntu, Raspberry Pi OS, etc.) with a DNS name or IP
  * SSH access to the server with private key authentication (root or a user with sudo)
+ * On your machine: [JBang](https://www.jbang.dev/), `ssh` and `rsync` — present out of the box on macOS and most Linux desktops. boot2vm needs Java 25, which JBang downloads automatically if you don't have it
+
+### Windows: use WSL
+
+Native Windows is not supported (there is no `rsync`, and the Maven/Gradle wrappers are started as shell scripts). Run boot2vm inside [WSL](https://learn.microsoft.com/windows/wsl/install) instead, where it works like on any Linux:
+
+```bash
+wsl --install                          # in PowerShell, once; gives you Ubuntu
+# then inside WSL:
+sudo apt install rsync openssh-client
+curl -Ls https://sh.jbang.dev | bash -s - app setup
+```
+
+Things that commonly trip people up:
+
+ * **SSH keys live in WSL's `~/.ssh`**, not in `C:\Users\<you>\.ssh`. Create a new key with `ssh-keygen -t ed25519`, or copy the existing one over and `chmod 600` the private key — ssh refuses keys with open permissions, which is what files under `/mnt/c` always have.
+ * **Keep the project inside the WSL file system** (e.g. `~/projects/myapp`), not under `/mnt/c/...`; builds through `/mnt/c` work but are much slower.
+ * **`.local` host names** (e.g. `raspberrypi.local`) usually don't resolve in WSL 2, as it sits behind NAT and mDNS doesn't get through. Use the device's IP address, or switch WSL to [mirrored networking](https://learn.microsoft.com/windows/wsl/networking#mirrored-mode-networking) (`networkingMode=mirrored` in `%UserProfile%\.wslconfig`, Windows 11) and install `libnss-mdns` in WSL.
 
 ## Usage
 
@@ -68,7 +86,11 @@ Deploy logs @pi2
 
 ### `Deploy init`
 
-Interactive one-time setup. Prompts for connection details, writes a `vmhosting.conf` in the current directory, then provisions the server:
+Interactive one-time setup. Opens a form in your browser for the connection details and other settings, writes a `vmhosting.conf` in the current directory, then provisions the server, with the progress shown in the terminal.
+
+The form shows all settings at once, hides the ones that don't apply (no domains for a headless service, no drain settings without blue-green, ...), and checks the values before anything is written. The hardware presets are checkboxes that stay in sync with the JVM options and groups below them. Inherited values are visible right away and can be cleared with a click. Closing the window (or the *Cancel* button) cancels init without writing anything.
+
+Add `--tui` (or set `BOOT2VM_TUI=1`) to answer the same questions in the terminal instead. The terminal UI is also used automatically over SSH and on Linux without a graphical display:
 
 ```
 Name for this server target (used as @name; blank keeps plain vmhosting.conf) [default]: cloud
@@ -221,6 +243,8 @@ Extra groups for the app user (comma-separated) [gpio,i2c,spi,dialout]:
 ```
 
 For the lazy: type `pi` for a Raspberry Pi with all hardware groups, or `pi-zero` for a Pi Zero 2 W and other 512 MB class boards, where the JVM is additionally tuned for a small and slow machine.
+
+In the terminal UI, when the target already has these settings, or a new target inherits them from another target, `init` shows them and asks whether to `keep`, `edit` or `clear` them. `clear` starts from scratch with no groups or flags. In the final *Extra JVM options* and *Extra groups* prompts, a blank answer keeps the value shown in brackets and `-` clears it.
 
 The presets follow the JDK chosen just before them. With `semeru` the JVM is OpenJ9, which silently ignores HotSpot's `-XX:+UseSerialGC` and `-XX:TieredStopAtLevel=1`, so the small-device and startup presets use OpenJ9's own options instead: `-XX:MaxRAMPercentage=60` (OpenJ9 defaults to only 25% of RAM for the heap), `-Xquickstart` and `-Xshareclasses:name=app`, a class and AOT code cache in the app user's `~/.cache/javasharedresources` that makes later starts faster. When you re-run `init` with a different JDK, flags from the previous `JVM_OPTS` that only the other VM supports are dropped (HotSpot refuses to start with OpenJ9's `-X` options), and you can pick the presets again to get the equivalents.
 
