@@ -695,9 +695,12 @@ public class Deploy {
         var selected = new ArrayList<String>();
         var rest = new ArrayList<String>();
         String from = null;
+        boolean tui = "1".equals(System.getenv("BOOT2VM_TUI")) || "true".equalsIgnoreCase(System.getenv("BOOT2VM_TUI"));
         for (int i = 0; i < rawArgs.length; i++) {
             String arg = rawArgs[i];
-            if ("--from".equals(arg)) {
+            if ("--tui".equals(arg)) {
+                tui = true;
+            } else if ("--from".equals(arg)) {
                 if (i + 1 >= rawArgs.length) throw new IllegalArgumentException("--from needs a target name");
                 from = rawArgs[++i].replaceFirst("^@", "");
             } else if (arg.startsWith("@") && arg.length() > 1) {
@@ -711,7 +714,7 @@ public class Deploy {
 
         try {
             switch (command) {
-                case "init" -> init(selected, from);
+                case "init" -> init(selected, from, tui);
                 case "deploy" -> deployTargets(resolveTargets(selected, true));
                 case "logs" -> { loadConfig(singleTarget(selected, "logs")); logs(args); }
                 case "env" -> env(args, selected);
@@ -986,226 +989,57 @@ public class Deploy {
     // -----------------------------------------------------------------------
     // init – interactively collect config, write vmhosting.conf, set up server
     // -----------------------------------------------------------------------
-    static void init(List<String> selected, String from) throws Exception {
+    static void init(List<String> selected, String from, boolean tui) throws Exception {
         if (selected.size() > 1) {
             throw new CommandFailed("init sets up one target at a time", 1);
         }
         String targetName = selected.isEmpty() ? "default" : selected.get(0);
-        if (!targetName.matches("[A-Za-z0-9_-]+")) {
+        if (!isValidTargetName(targetName)) {
             throw new CommandFailed("Target name may contain only letters, digits, '-' and '_': " + targetName, 1);
         }
-        var console = System.console();
-        if (console == null) {
-            System.err.println("No console available for interactive input");
-            System.exit(1);
+        if (from != null && !Files.exists(Target.named(from).path())) {
+            throw new CommandFailed("--from target '@" + from + "' not found (" + Target.named(from).path() + ")", 1);
         }
-        if (selected.isEmpty() && allTargets().isEmpty()) {
-            // First server of a fresh project: offer a name right away, so that later
-            // additions leave no anonymous "default" whose host nobody remembers.
-            while (true) {
-                targetName = prompt(console, "Name for this server target (used as @name; blank keeps plain vmhosting.conf)", "default");
-                if (targetName.matches("[A-Za-z0-9_-]+")) break;
-                System.err.println("  Use only letters, digits, '-' and '_'");
-            }
-        }
-        Target target = Target.named(targetName);
+        // First server of a fresh project: offer a name right away, so that later
+        // additions leave no anonymous "default" whose host nobody remembers.
+        boolean askName = selected.isEmpty() && allTargets().isEmpty();
+
+        InitResult result = promptInit(targetName, askName, from);
+        runInit(result.target(), result.config());
+    }
+
+    record InitResult(Target target, InitConfig config) {}
+
+    static boolean isValidTargetName(String name) {
+        return name.matches("[A-Za-z0-9_-]+");
+    }
+
+    /**
+     * Where init takes its defaults from: --from @other, else the target's own file,
+     * else the first existing target. That makes adding a server mostly a matter of
+     * typing its host. Null when there is nothing to start from.
+     */
+    static Path defaultsSource(Target target, String from) throws IOException {
+        if (from != null) return Target.named(from).path();
+        if (Files.exists(target.path())) return target.path();
+        List<Target> existing = allTargets();
+        return existing.isEmpty() ? null : existing.get(0).path();
+    }
+
+    /** Init defaults for the target, read from the given config file (null for built-in defaults only). */
+    static InitConfig initDefaults(Target target, Path source) throws IOException {
+        InitConfig config = source == null ? new InitConfig() : InitConfig.load(source, source.equals(target.path()));
+        config.fillDefaults();
+        return config;
+    }
+
+    /** Write the target's config file, provision the server and run the first deploy. */
+    static void runInit(Target target, InitConfig config) throws Exception {
         currentTarget = target;
         Path configPath = target.path();
-
-        // Defaults come from: --from @other, else this target's own file, else vmhosting.conf.
-        // That makes adding a server mostly a matter of typing its host and pressing Enter.
-        Path defaultsPath = configPath;
-        if (from != null) {
-            defaultsPath = Target.named(from).path();
-            if (!Files.exists(defaultsPath)) {
-                throw new CommandFailed("--from target '@" + from + "' not found (" + defaultsPath + ")", 1);
-            }
-        } else if (!Files.exists(configPath)) {
-            List<Target> existing = allTargets();
-            if (!existing.isEmpty()) defaultsPath = existing.get(0).path();
-        }
-        if (!defaultsPath.equals(configPath) && Files.exists(defaultsPath)) {
-            System.out.println("New target @" + target.name() + " (" + configPath + "), defaults taken from " + defaultsPath);
-        }
-        String defaultHost = null, defaultUser = null, defaultDomain = null,
-                defaultKey = null, defaultAdmin = null, defaultHttps = null,
-                defaultProxy = null, defaultAppType = null, defaultJdkProvider = null,
-                defaultBlueGreen = null, defaultGracefulDrain = null, defaultSlotCookie = null,
-                defaultDrainTimeout = null, defaultManagementPort = null, defaultNotifyPath = null,
-                defaultActiveUsersPath = null, defaultFirewall = null, defaultExposeNodes = null,
-                defaultWebService = null, defaultPort = null,
-                defaultJvmOpts = null, defaultUserGroups = null;
-        if (Files.exists(defaultsPath)) {
-            var props = new Properties();
-            try (var reader = Files.newBufferedReader(defaultsPath)) {
-                props.load(reader);
-            }
-            // Never suggest another server's host or domains as the default for a new target
-            boolean ownConfig = defaultsPath.equals(configPath);
-            defaultHost = ownConfig ? props.getProperty("HOST") : null;
-            defaultUser = props.getProperty("USER");
-            defaultDomain = ownConfig ? props.getProperty("DOMAIN") : null;
-            defaultKey = props.getProperty("SSH_KEY");
-            defaultAdmin = props.getProperty("ADMIN_USER");
-            defaultHttps = props.getProperty("HTTPS");
-            defaultProxy = props.getProperty("PROXY");
-            defaultAppType = props.getProperty("APP_TYPE");
-            defaultJdkProvider = props.getProperty("JDK_PROVIDER");
-            defaultBlueGreen = props.getProperty("BLUE_GREEN");
-            defaultGracefulDrain = props.getProperty("BLUE_GREEN_GRACEFUL");
-            defaultSlotCookie = props.getProperty("SLOT_COOKIE");
-            defaultDrainTimeout = props.getProperty("DRAIN_TIMEOUT");
-            defaultManagementPort = props.getProperty("MANAGEMENT_PORT");
-            defaultNotifyPath = props.getProperty("NOTIFY_PATH");
-            defaultActiveUsersPath = props.getProperty("ACTIVE_USERS_PATH");
-            defaultFirewall = props.getProperty("FIREWALL");
-            defaultExposeNodes = props.getProperty("EXPOSE_NODES");
-            defaultWebService = props.getProperty("WEB_SERVICE");
-            defaultPort = props.getProperty("PORT");
-            defaultJvmOpts = props.getProperty("JVM_OPTS");
-            defaultUserGroups = props.getProperty("USER_GROUPS");
-        }
-
-        // HOST (required, single hostname — extra domains are asked separately)
-        while (true) {
-            host = prompt(console, "Host (SSH address, a single hostname or IP)", defaultHost);
-            if (host.isBlank()) {
-                System.err.println("Host is required");
-                System.exit(1);
-            }
-            if (host.contains(",") || host.matches(".*\\s.*")) {
-                System.err.println("  Host must be a single hostname or IP — additional domains are entered at the 'Domain(s)' prompt below.");
-                continue;
-            }
-            break;
-        }
-
-        // Derive smart defaults from host
-        String derivedUser = host.contains(".") ? host.substring(0, host.indexOf('.')) : host;
-
-        // USER, WEB_SERVICE, DOMAIN, SSH_KEY, ADMIN_USER – with defaults
-        user = prompt(console, "App user", defaultUser != null ? defaultUser : derivedUser);
-        String webServiceStr = prompt(console, "Does this service expose web endpoints (yes/no)",
-                defaultWebService != null ? defaultWebService : "yes");
-        webService = !"no".equalsIgnoreCase(webServiceStr);
-
-        String domainRaw;
-        if (webService) {
-            domainRaw = prompt(console, "Domain(s) (comma-separated for multiple)", defaultDomain != null ? defaultDomain : host);
-        } else {
-            domainRaw = defaultDomain != null ? defaultDomain : host;
-        }
-        domain = domainRaw.replaceAll("\\s*,\\s*", " ").trim();
-        String sshKeyRaw = promptSshKey(console, defaultKey);
-        adminUser = prompt(console, "Admin SSH user",
-                defaultAdmin != null ? defaultAdmin : "root");
-        if (webService) {
-            String httpsStr = prompt(console, "HTTPS (yes/no/internal)",
-                    defaultHttps != null ? defaultHttps : (isLocalAddress(domain) ? "no" : "yes"));
-            httpsMode = parseHttpsMode(httpsStr);
-            proxy = prompt(console, "Reverse proxy (caddy/none)",
-                    defaultProxy != null ? defaultProxy : "caddy");
-            String portStr = prompt(console, "App port (must be unique per app on the server; blue-green also uses port+1)",
-                    defaultPort != null ? defaultPort : "8080");
-            port = Integer.parseInt(portStr);
-        } else {
-            httpsMode = "no";
-            proxy = "none";
-        }
-        appType = prompt(console, "App type (spring-boot/quarkus/plain)",
-                defaultAppType != null ? defaultAppType : detectAppType());
-        jdkProvider = prompt(console, "JDK provider (temurin/zulu/semeru)",
-                defaultJdkProvider != null ? defaultJdkProvider : "temurin");
-        promptJvmAndHardware(console, jdkProvider, defaultJvmOpts, defaultUserGroups);
-        if (webService) {
-            String blueGreenStr = prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
-                    defaultBlueGreen != null ? defaultBlueGreen : "no");
-            blueGreen = "yes".equalsIgnoreCase(blueGreenStr);
-
-            if (blueGreen) {
-                String gracefulDrainStr = prompt(console, "Graceful drain mode (yes/no)",
-                        defaultGracefulDrain != null ? defaultGracefulDrain : "no");
-                gracefulDrain = "yes".equalsIgnoreCase(gracefulDrainStr);
-                if (gracefulDrain) {
-                    slotCookie = prompt(console, "Slot cookie name",
-                            defaultSlotCookie != null ? defaultSlotCookie : "X-Slot");
-                    String drainTimeoutStr = prompt(console, "Drain timeout (seconds)",
-                            defaultDrainTimeout != null ? defaultDrainTimeout : "300");
-                    drainTimeout = Integer.parseInt(drainTimeoutStr);
-                    managementPort = prompt(console, "Management port (blank = app port)",
-                            defaultManagementPort != null ? defaultManagementPort : "8090");
-                    notifyPath = prompt(console, "Notify path",
-                            defaultNotifyPath != null ? defaultNotifyPath : "/actuator/new-version");
-                    activeUsersPath = prompt(console, "Active users path",
-                            defaultActiveUsersPath != null ? defaultActiveUsersPath : "/actuator/active-users");
-                }
-            }
-        } else {
-            blueGreen = false;
-            gracefulDrain = false;
-        }
-
-        String firewallStr = prompt(console, "Configure firewall with ufw (yes/no)",
-                defaultFirewall != null ? defaultFirewall : "yes");
-        boolean firewall = "yes".equalsIgnoreCase(firewallStr);
-        boolean exposeNodes = false;
-        if (firewall && webService) {
-            String exposePortsLabel = blueGreen ? port + "/" + (port + 1) : String.valueOf(port);
-            String exposeNodesStr = prompt(console, "Expose app server port(s) " + exposePortsLabel + " for direct access (yes/no)",
-                    defaultExposeNodes != null ? defaultExposeNodes : "no");
-            exposeNodes = "yes".equalsIgnoreCase(exposeNodesStr);
-        }
-
-        // Collect environment variables
-        System.out.println("Enter environment variables for the app (stored on server only, never locally).");
-        System.out.println("Format: KEY=VALUE (values with spaces must be quoted: KEY=\"value with spaces\")");
-        var envVars = new ArrayList<String>();
-        while (true) {
-            String entry = console.readLine("Environment variable (KEY=VALUE, blank to finish): ").trim();
-            if (entry.isEmpty()) break;
-            if (!entry.contains("=")) {
-                System.err.println("  Invalid format — expected KEY=VALUE");
-                continue;
-            }
-            envVars.add(entry);
-        }
-
-        validateHttpsMode();
-
-        // Write vmhosting.conf
-        Files.writeString(configPath,
-                "HOST=" + host + "\n"
-                + "USER=" + user + "\n"
-                + "DOMAIN=" + domain + "\n"
-                + "SSH_KEY=" + sshKeyRaw + "\n"
-                + "ADMIN_USER=" + adminUser + "\n"
-                + "HTTPS=" + httpsMode + "\n"
-                + "PROXY=" + proxy + "\n"
-                + "APP_TYPE=" + appType + "\n"
-                + "JDK_PROVIDER=" + jdkProvider + "\n"
-                + "PORT=" + port + "\n"
-                + "BLUE_GREEN=" + (blueGreen ? "yes" : "no") + "\n"
-                + "BLUE_GREEN_GRACEFUL=" + (gracefulDrain ? "yes" : "no") + "\n"
-                + "SLOT_COOKIE=" + slotCookie + "\n"
-                + "DRAIN_TIMEOUT=" + drainTimeout + "\n"
-                + "MANAGEMENT_PORT=" + managementPort + "\n"
-                + "NOTIFY_PATH=" + notifyPath + "\n"
-                + "ACTIVE_USERS_PATH=" + activeUsersPath + "\n"
-                + "FIREWALL=" + (firewall ? "yes" : "no") + "\n"
-                + "EXPOSE_NODES=" + (exposeNodes ? "yes" : "no") + "\n"
-                + "WEB_SERVICE=" + (webService ? "yes" : "no") + "\n"
-                + "JVM_OPTS=" + jvmOpts + "\n"
-                + "USER_GROUPS=" + userGroups + "\n");
+        config.apply();
+        Files.writeString(configPath, config.toConf());
         System.out.println("Wrote " + configPath);
-
-        // Resolve the private key path for SSH connections (strip .pub if present)
-        sshKey = sshKeyRaw;
-        if (sshKey.endsWith(".pub")) {
-            sshKey = sshKey.substring(0, sshKey.length() - 4);
-        }
-        if (sshKey.startsWith("~")) {
-            sshKey = System.getProperty("user.home") + sshKey.substring(1);
-        }
 
         // Upload and execute setup script
         System.out.println("Initializing server " + host + " ...");
@@ -1219,8 +1053,8 @@ public class Deploy {
                 + user + " '" + domain + "' " + adminUser + " " + httpsMode
                 + " " + proxy + " " + appType + " " + (blueGreen ? "yes" : "no")
                 + " " + (managementPort != null && !managementPort.isBlank() ? managementPort : "0")
-                + " " + (firewall ? "yes" : "no")
-                + " " + (exposeNodes ? "yes" : "no")
+                + " " + (config.isFirewall() ? "yes" : "no")
+                + " " + (config.isExposeNodes() ? "yes" : "no")
                 + " " + (webService ? "yes" : "no")
                 + " " + jdkProvider
                 + " " + port
@@ -1230,6 +1064,7 @@ public class Deploy {
         Files.delete(tempScript);
 
         // Write env vars to server if any were provided
+        List<String> envVars = config.envLines();
         if (!envVars.isEmpty()) {
             System.out.println("Writing environment variables to server ...");
             var envContent = new StringBuilder();
@@ -1248,6 +1083,368 @@ public class Deploy {
         deployTargets(List.of(target));
     }
 
+    /** The terminal UI for init: one prompt per setting, defaults in brackets. */
+    static InitResult promptInit(String targetName, boolean askName, String from) throws IOException {
+        var console = System.console();
+        if (console == null) {
+            throw new CommandFailed("No console available for interactive input", 1);
+        }
+        if (askName) {
+            while (true) {
+                targetName = prompt(console, "Name for this server target (used as @name; blank keeps plain vmhosting.conf)", "default");
+                if (isValidTargetName(targetName)) break;
+                System.err.println("  Use only letters, digits, '-' and '_'");
+            }
+        }
+        Target target = Target.named(targetName);
+        Path source = defaultsSource(target, from);
+        if (source != null && !source.equals(target.path())) {
+            System.out.println("New target @" + target.name() + " (" + target.path() + "), defaults taken from " + source);
+        }
+        InitConfig c = initDefaults(target, source);
+
+        // HOST (required, single hostname — extra domains are asked separately)
+        while (true) {
+            c.setHost(prompt(console, "Host (SSH address, a single hostname or IP)", c.getHost()));
+            if (c.getHost().isBlank()) {
+                throw new CommandFailed("Host is required", 1);
+            }
+            if (c.getHost().contains(",") || c.getHost().matches(".*\\s.*")) {
+                System.err.println("  Host must be a single hostname or IP — additional domains are entered at the 'Domain(s)' prompt below.");
+                continue;
+            }
+            break;
+        }
+
+        c.setUser(prompt(console, "App user", c.getUser() != null ? c.getUser() : c.derivedUser()));
+        c.setWebService(!"no".equalsIgnoreCase(prompt(console, "Does this service expose web endpoints (yes/no)",
+                c.isWebService() ? "yes" : "no")));
+        if (c.isWebService()) {
+            c.setDomain(prompt(console, "Domain(s) (comma-separated for multiple)", c.getDomain() != null ? c.getDomain() : c.getHost()));
+        }
+        c.setSshKey(promptSshKey(console, c.getSshKey()));
+        c.setAdminUser(prompt(console, "Admin SSH user", c.getAdminUser()));
+        if (c.isWebService()) {
+            c.setHttps(prompt(console, "HTTPS (yes/no/internal)", c.getHttps() != null ? c.getHttps() : c.derivedHttps()));
+            c.setProxy(prompt(console, "Reverse proxy (caddy/none)", c.getProxy()));
+            c.setPort(prompt(console, "App port (must be unique per app on the server; blue-green also uses port+1)", c.getPort()));
+        }
+        c.setAppType(prompt(console, "App type (spring-boot/quarkus/plain)", c.getAppType()));
+        c.setJdkProvider(prompt(console, "JDK provider (temurin/zulu/semeru)", c.getJdkProvider()));
+        promptJvmAndHardware(console, c);
+        if (c.isWebService()) {
+            c.setBlueGreen("yes".equalsIgnoreCase(prompt(console, "Blue-green deployment (yes/no) [not recommended for low-end servers]",
+                    c.isBlueGreen() ? "yes" : "no")));
+            if (c.isBlueGreen()) {
+                c.setGracefulDrain("yes".equalsIgnoreCase(prompt(console, "Graceful drain mode (yes/no)",
+                        c.isGracefulDrain() ? "yes" : "no")));
+                if (c.isGracefulDrain()) {
+                    c.setSlotCookie(prompt(console, "Slot cookie name", c.getSlotCookie()));
+                    c.setDrainTimeout(prompt(console, "Drain timeout (seconds)", c.getDrainTimeout()));
+                    c.setManagementPort(prompt(console, "Management port (blank = app port)", c.getManagementPort()));
+                    c.setNotifyPath(prompt(console, "Notify path", c.getNotifyPath()));
+                    c.setActiveUsersPath(prompt(console, "Active users path", c.getActiveUsersPath()));
+                }
+            }
+        }
+
+        c.setFirewall("yes".equalsIgnoreCase(prompt(console, "Configure firewall with ufw (yes/no)",
+                c.isFirewall() ? "yes" : "no")));
+        if (c.isFirewall() && c.isWebService()) {
+            int p = c.getPort().matches("\\d+") ? Integer.parseInt(c.getPort()) : 8080;
+            String exposePortsLabel = c.isBlueGreen() ? p + "/" + (p + 1) : String.valueOf(p);
+            c.setExposeNodes("yes".equalsIgnoreCase(prompt(console, "Expose app server port(s) " + exposePortsLabel + " for direct access (yes/no)",
+                    c.isExposeNodes() ? "yes" : "no")));
+        }
+
+        // Collect environment variables
+        System.out.println("Enter environment variables for the app (stored on server only, never locally).");
+        System.out.println("Format: KEY=VALUE (values with spaces must be quoted: KEY=\"value with spaces\")");
+        var envVars = new ArrayList<String>();
+        while (true) {
+            String entry = console.readLine("Environment variable (KEY=VALUE, blank to finish): ").trim();
+            if (entry.isEmpty()) break;
+            if (!entry.contains("=")) {
+                System.err.println("  Invalid format — expected KEY=VALUE");
+                continue;
+            }
+            envVars.add(entry);
+        }
+        c.setEnv(String.join("\n", envVars));
+
+        c.fillHostDerived();
+        c.normalize();
+        var errors = c.validate();
+        if (!errors.isEmpty()) {
+            errors.values().forEach(e -> System.err.println("  " + e));
+            throw new CommandFailed("Invalid settings, nothing was written", 1);
+        }
+        return new InitResult(target, c);
+    }
+
+    /**
+     * Everything init asks, one property per vmhosting.conf key plus the app's
+     * environment variables, which only ever go to the server. A plain bean so
+     * that both the terminal UI and the browser form (via FormBinder) can edit it.
+     * Null means "not set yet": fillDefaults() and fillHostDerived() fill those in.
+     */
+    public static class InitConfig {
+        static final List<String> HTTPS_MODES = List.of("yes", "no", "internal");
+        static final List<String> PROXIES = List.of("caddy", "none");
+        static final List<String> APP_TYPES = List.of("spring-boot", "quarkus", "plain");
+        static final List<String> JDK_PROVIDERS = List.of("temurin", "zulu", "semeru");
+
+        private String host, user, domain, sshKey, adminUser, https, proxy, port, appType, jdkProvider;
+        private String jvmOpts, userGroups;
+        private String slotCookie, drainTimeout, managementPort, notifyPath, activeUsersPath;
+        private String env;
+        private boolean webService = true, blueGreen, gracefulDrain, firewall = true, exposeNodes;
+
+        /**
+         * Read a config file. Another target's host and domains, and the HTTPS
+         * mode that depends on them, are never taken over as defaults for a new target.
+         */
+        static InitConfig load(Path path, boolean ownConfig) throws IOException {
+            var props = new Properties();
+            try (var reader = Files.newBufferedReader(path)) {
+                props.load(reader);
+            }
+            var c = new InitConfig();
+            c.host = ownConfig ? props.getProperty("HOST") : null;
+            c.domain = ownConfig ? props.getProperty("DOMAIN") : null;
+            c.user = props.getProperty("USER");
+            c.sshKey = props.getProperty("SSH_KEY");
+            c.adminUser = props.getProperty("ADMIN_USER");
+            c.https = ownConfig ? props.getProperty("HTTPS") : null;
+            c.proxy = props.getProperty("PROXY");
+            c.port = props.getProperty("PORT");
+            c.appType = props.getProperty("APP_TYPE");
+            c.jdkProvider = props.getProperty("JDK_PROVIDER");
+            c.jvmOpts = props.getProperty("JVM_OPTS");
+            c.userGroups = props.getProperty("USER_GROUPS");
+            c.slotCookie = props.getProperty("SLOT_COOKIE");
+            c.drainTimeout = props.getProperty("DRAIN_TIMEOUT");
+            c.managementPort = props.getProperty("MANAGEMENT_PORT");
+            c.notifyPath = props.getProperty("NOTIFY_PATH");
+            c.activeUsersPath = props.getProperty("ACTIVE_USERS_PATH");
+            c.webService = !"no".equalsIgnoreCase(props.getProperty("WEB_SERVICE", "yes"));
+            c.blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
+            c.gracefulDrain = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN_GRACEFUL", "no"));
+            c.firewall = "yes".equalsIgnoreCase(props.getProperty("FIREWALL", "yes"));
+            c.exposeNodes = "yes".equalsIgnoreCase(props.getProperty("EXPOSE_NODES", "no"));
+            // Without graceful drain the port is written blank: suggest the usual one if it gets enabled
+            if (!c.gracefulDrain && c.managementPort != null && c.managementPort.isBlank()) c.managementPort = null;
+            return c;
+        }
+
+        /** Built-in defaults for everything that does not depend on the host. */
+        void fillDefaults() throws IOException {
+            if (sshKey == null) sshKey = defaultSshKey(listSshKeys(), null);
+            else sshKey = defaultSshKey(List.of(), sshKey);
+            if (adminUser == null) adminUser = "root";
+            if (proxy == null) proxy = "caddy";
+            if (port == null) port = "8080";
+            if (appType == null) appType = detectAppType();
+            if (jdkProvider == null) jdkProvider = "temurin";
+            if (jvmOpts == null) jvmOpts = "";
+            if (userGroups == null) userGroups = "";
+            if (slotCookie == null) slotCookie = "X-Slot";
+            if (drainTimeout == null) drainTimeout = "300";
+            if (managementPort == null) managementPort = "8090";
+            if (notifyPath == null) notifyPath = "/actuator/new-version";
+            if (activeUsersPath == null) activeUsersPath = "/actuator/active-users";
+        }
+
+        /** The app user suggested for the current host: its first label. */
+        String derivedUser() {
+            if (host == null || host.isBlank()) return null;
+            String h = host.trim();
+            return h.contains(".") ? h.substring(0, h.indexOf('.')) : h;
+        }
+
+        /** HTTPS suggested for the current domains: off for LAN names a public CA cannot certify. */
+        String derivedHttps() {
+            String d = domain != null && !domain.isBlank() ? domain : host;
+            if (d == null || d.isBlank()) return "yes";
+            return isLocalAddress(d.replaceAll("\\s*,\\s*", " ")) ? "no" : "yes";
+        }
+
+        /** Fill the values left blank that are derived from the host. */
+        void fillHostDerived() {
+            if (host == null || host.isBlank()) return;
+            host = host.trim();
+            if (user == null || user.isBlank()) user = derivedUser();
+            if (domain == null || domain.isBlank()) domain = host;
+            if (https == null || https.isBlank()) https = derivedHttps();
+        }
+
+        /** Trim values and switch off settings that do not apply to the chosen mode. */
+        void normalize() {
+            if (domain != null) domain = domain.replaceAll("[\\s,]+", " ").trim();
+            if (jvmOpts != null) jvmOpts = jvmOpts.trim().replaceAll("\\s+", " ");
+            if (userGroups != null) userGroups = userGroups.replaceAll("[\\s,]+", ",").replaceAll("^,|,$", "");
+            if (https != null) https = https.trim().toLowerCase(Locale.ROOT);
+            if (!webService) {
+                https = "no";
+                proxy = "none";
+                blueGreen = false;
+            }
+            if (!blueGreen) gracefulDrain = false;
+            if (!gracefulDrain) managementPort = "";
+            if (!firewall || !webService) exposeNodes = false;
+        }
+
+        /** Problems keyed by property name; empty when the config can be written. */
+        Map<String, String> validate() {
+            var errors = new LinkedHashMap<String, String>();
+            if (host == null || host.isBlank()) errors.put("host", "Host is required");
+            else if (host.contains(",") || host.matches(".*\\s.*"))
+                errors.put("host", "Host must be a single hostname or IP; put additional domains in Domain(s)");
+            if (user == null || !user.matches("[a-z_][a-z0-9_-]{0,31}"))
+                errors.put("user", "App user must be a Linux user name: lowercase letters, digits, '-' and '_'");
+            if (sshKey == null || sshKey.isBlank()) errors.put("sshKey", "SSH public key is required");
+            if (adminUser == null || adminUser.isBlank()) errors.put("adminUser", "Admin SSH user is required");
+            if (!APP_TYPES.contains(appType)) errors.put("appType", "App type must be one of " + APP_TYPES);
+            if (!JDK_PROVIDERS.contains(jdkProvider)) errors.put("jdkProvider", "JDK provider must be one of " + JDK_PROVIDERS);
+            if (webService) {
+                if (domain == null || domain.isBlank()) errors.put("domain", "At least one domain is required");
+                if (!HTTPS_MODES.contains(https)) errors.put("https", "HTTPS must be yes, no or internal");
+                else if ("internal".equals(https) && !"caddy".equals(proxy))
+                    errors.put("https", "HTTPS internal requires Caddy as the reverse proxy");
+                if (!PROXIES.contains(proxy)) errors.put("proxy", "Reverse proxy must be caddy or none");
+                if (!isPort(port)) errors.put("port", "App port must be a number between 1 and 65535");
+            }
+            if (gracefulDrain) {
+                if (slotCookie == null || !slotCookie.matches("[A-Za-z0-9_-]+"))
+                    errors.put("slotCookie", "Slot cookie name may contain only letters, digits, '-' and '_'");
+                if (drainTimeout == null || !drainTimeout.matches("\\d+")) errors.put("drainTimeout", "Drain timeout must be a number of seconds");
+                if (managementPort != null && !managementPort.isBlank() && !isPort(managementPort))
+                    errors.put("managementPort", "Management port must be blank or a number between 1 and 65535");
+            }
+            if (jvmOpts != null && jvmOpts.contains("\""))
+                errors.put("jvmOpts", "Double quotes are not supported in JVM options (the value is written into a quoted systemd Environment= line)");
+            if (userGroups != null && !userGroups.matches("[a-z0-9_,-]*"))
+                errors.put("userGroups", "Groups must be comma-separated Linux group names");
+            for (String line : envLines()) {
+                if (!line.matches("[A-Za-z_][A-Za-z0-9_]*=.*")) {
+                    errors.put("env", "Invalid environment variable line, expected KEY=VALUE: " + line);
+                    break;
+                }
+            }
+            return errors;
+        }
+
+        static boolean isPort(String value) {
+            if (value == null || !value.trim().matches("\\d{1,5}")) return false;
+            int p = Integer.parseInt(value.trim());
+            return p > 0 && p < 65536;
+        }
+
+        List<String> envLines() {
+            if (env == null) return List.of();
+            return env.lines().map(String::trim).filter(l -> !l.isEmpty()).toList();
+        }
+
+        /** Copy into the static fields the rest of the tool works with. */
+        void apply() {
+            Deploy.host = host;
+            Deploy.user = user;
+            Deploy.domain = domain;
+            Deploy.adminUser = adminUser;
+            Deploy.httpsMode = https;
+            Deploy.proxy = proxy;
+            Deploy.webService = webService;
+            Deploy.appType = appType;
+            Deploy.jdkProvider = jdkProvider;
+            Deploy.port = Integer.parseInt(port.trim());
+            Deploy.blueGreen = blueGreen;
+            Deploy.gracefulDrain = gracefulDrain;
+            Deploy.slotCookie = slotCookie;
+            Deploy.drainTimeout = Integer.parseInt(drainTimeout.trim());
+            Deploy.managementPort = managementPort;
+            Deploy.notifyPath = notifyPath;
+            Deploy.activeUsersPath = activeUsersPath;
+            Deploy.jvmOpts = jvmOpts;
+            Deploy.userGroups = userGroups;
+            validateHttpsMode();
+            // Resolve the private key path for SSH connections (strip .pub if present)
+            String key = sshKey.endsWith(".pub") ? sshKey.substring(0, sshKey.length() - 4) : sshKey;
+            Deploy.sshKey = key.startsWith("~") ? System.getProperty("user.home") + key.substring(1) : key;
+        }
+
+        String toConf() {
+            return "HOST=" + host + "\n"
+                    + "USER=" + user + "\n"
+                    + "DOMAIN=" + domain + "\n"
+                    + "SSH_KEY=" + sshKey + "\n"
+                    + "ADMIN_USER=" + adminUser + "\n"
+                    + "HTTPS=" + https + "\n"
+                    + "PROXY=" + proxy + "\n"
+                    + "APP_TYPE=" + appType + "\n"
+                    + "JDK_PROVIDER=" + jdkProvider + "\n"
+                    + "PORT=" + port.trim() + "\n"
+                    + "BLUE_GREEN=" + (blueGreen ? "yes" : "no") + "\n"
+                    + "BLUE_GREEN_GRACEFUL=" + (gracefulDrain ? "yes" : "no") + "\n"
+                    + "SLOT_COOKIE=" + slotCookie + "\n"
+                    + "DRAIN_TIMEOUT=" + drainTimeout.trim() + "\n"
+                    + "MANAGEMENT_PORT=" + managementPort + "\n"
+                    + "NOTIFY_PATH=" + notifyPath + "\n"
+                    + "ACTIVE_USERS_PATH=" + activeUsersPath + "\n"
+                    + "FIREWALL=" + (firewall ? "yes" : "no") + "\n"
+                    + "EXPOSE_NODES=" + (exposeNodes ? "yes" : "no") + "\n"
+                    + "WEB_SERVICE=" + (webService ? "yes" : "no") + "\n"
+                    + "JVM_OPTS=" + jvmOpts + "\n"
+                    + "USER_GROUPS=" + userGroups + "\n";
+        }
+
+        public String getHost() { return host; }
+        public void setHost(String host) { this.host = host; }
+        public String getUser() { return user; }
+        public void setUser(String user) { this.user = user; }
+        public String getDomain() { return domain; }
+        public void setDomain(String domain) { this.domain = domain; }
+        public String getSshKey() { return sshKey; }
+        public void setSshKey(String sshKey) { this.sshKey = sshKey; }
+        public String getAdminUser() { return adminUser; }
+        public void setAdminUser(String adminUser) { this.adminUser = adminUser; }
+        public String getHttps() { return https; }
+        public void setHttps(String https) { this.https = https; }
+        public String getProxy() { return proxy; }
+        public void setProxy(String proxy) { this.proxy = proxy; }
+        public String getPort() { return port; }
+        public void setPort(String port) { this.port = port; }
+        public String getAppType() { return appType; }
+        public void setAppType(String appType) { this.appType = appType; }
+        public String getJdkProvider() { return jdkProvider; }
+        public void setJdkProvider(String jdkProvider) { this.jdkProvider = jdkProvider; }
+        public String getJvmOpts() { return jvmOpts; }
+        public void setJvmOpts(String jvmOpts) { this.jvmOpts = jvmOpts; }
+        public String getUserGroups() { return userGroups; }
+        public void setUserGroups(String userGroups) { this.userGroups = userGroups; }
+        public String getSlotCookie() { return slotCookie; }
+        public void setSlotCookie(String slotCookie) { this.slotCookie = slotCookie; }
+        public String getDrainTimeout() { return drainTimeout; }
+        public void setDrainTimeout(String drainTimeout) { this.drainTimeout = drainTimeout; }
+        public String getManagementPort() { return managementPort; }
+        public void setManagementPort(String managementPort) { this.managementPort = managementPort; }
+        public String getNotifyPath() { return notifyPath; }
+        public void setNotifyPath(String notifyPath) { this.notifyPath = notifyPath; }
+        public String getActiveUsersPath() { return activeUsersPath; }
+        public void setActiveUsersPath(String activeUsersPath) { this.activeUsersPath = activeUsersPath; }
+        public String getEnv() { return env; }
+        public void setEnv(String env) { this.env = env; }
+        public boolean isWebService() { return webService; }
+        public void setWebService(boolean webService) { this.webService = webService; }
+        public boolean isBlueGreen() { return blueGreen; }
+        public void setBlueGreen(boolean blueGreen) { this.blueGreen = blueGreen; }
+        public boolean isGracefulDrain() { return gracefulDrain; }
+        public void setGracefulDrain(boolean gracefulDrain) { this.gracefulDrain = gracefulDrain; }
+        public boolean isFirewall() { return firewall; }
+        public void setFirewall(boolean firewall) { this.firewall = firewall; }
+        public boolean isExposeNodes() { return exposeNodes; }
+        public void setExposeNodes(boolean exposeNodes) { this.exposeNodes = exposeNodes; }
+    }
+
     static String prompt(Console console, String label, String defaultValue) {
         String p = defaultValue != null
                 ? label + " [" + defaultValue + "]: "
@@ -1257,41 +1454,24 @@ public class Deploy {
     }
 
     /**
+     * Like {@link #prompt}, but a non-empty default can be dropped by answering "-",
+     * since a blank answer keeps the default.
+     */
+    static String promptClearable(Console console, String label, String defaultValue) {
+        if (defaultValue == null || defaultValue.isEmpty()) return prompt(console, label, null);
+        String input = prompt(console, label + " ('-' to clear)", defaultValue);
+        return input.equals("-") ? "" : input;
+    }
+
+    /**
      * Ask for the SSH public key. Lists the *.pub files found in ~/.ssh so the
      * user can pick one by number instead of typing the full path. A path can
      * still be typed directly. The returned value keeps the ~ prefix so the
      * written vmhosting.conf stays portable between machines and users.
      */
     static String promptSshKey(Console console, String defaultKey) throws IOException {
-        Path sshDir = Path.of(System.getProperty("user.home"), ".ssh");
-        List<String> keys = new ArrayList<>();
-        if (Files.isDirectory(sshDir)) {
-            try (var stream = Files.list(sshDir)) {
-                stream.filter(f -> f.getFileName().toString().endsWith(".pub"))
-                        .filter(Files::isRegularFile)
-                        .map(f -> "~/.ssh/" + f.getFileName())
-                        .sorted()
-                        .forEach(keys::add);
-            }
-        }
-
-        // Pick a default: previous config value, then common key names, then the first key found
-        String def = defaultKey;
-        String home = System.getProperty("user.home");
-        if (def != null && def.startsWith(home + "/")) {
-            def = "~" + def.substring(home.length());
-        }
-        if (def == null) {
-            for (String candidate : List.of("~/.ssh/id_ed25519.pub", "~/.ssh/id_rsa.pub", "~/.ssh/id_ecdsa.pub")) {
-                if (keys.contains(candidate)) {
-                    def = candidate;
-                    break;
-                }
-            }
-        }
-        if (def == null) {
-            def = keys.isEmpty() ? "~/.ssh/id_rsa.pub" : keys.get(0);
-        }
+        List<String> keys = listSshKeys();
+        String def = defaultSshKey(keys, defaultKey);
 
         if (keys.isEmpty()) {
             return prompt(console, "SSH public key", def);
@@ -1314,6 +1494,43 @@ public class Deploy {
             }
             return input;
         }
+    }
+
+    /** The *.pub files in ~/.ssh, as ~/.ssh/name.pub so the written config stays portable. */
+    static List<String> listSshKeys() throws IOException {
+        Path sshDir = Path.of(System.getProperty("user.home"), ".ssh");
+        List<String> keys = new ArrayList<>();
+        if (Files.isDirectory(sshDir)) {
+            try (var stream = Files.list(sshDir)) {
+                stream.filter(f -> f.getFileName().toString().endsWith(".pub"))
+                        .filter(Files::isRegularFile)
+                        .map(f -> "~/.ssh/" + f.getFileName())
+                        .sorted()
+                        .forEach(keys::add);
+            }
+        }
+        return keys;
+    }
+
+    /** Pick a default key: the configured one, then common key names, then the first key found. */
+    static String defaultSshKey(List<String> keys, String configured) {
+        String def = configured;
+        String home = System.getProperty("user.home");
+        if (def != null && def.startsWith(home + "/")) {
+            def = "~" + def.substring(home.length());
+        }
+        if (def == null) {
+            for (String candidate : List.of("~/.ssh/id_ed25519.pub", "~/.ssh/id_rsa.pub", "~/.ssh/id_ecdsa.pub")) {
+                if (keys.contains(candidate)) {
+                    def = candidate;
+                    break;
+                }
+            }
+        }
+        if (def == null) {
+            def = keys.isEmpty() ? "~/.ssh/id_rsa.pub" : keys.get(0);
+        }
+        return def;
     }
 
     /**
@@ -1382,26 +1599,47 @@ public class Deploy {
      * use cases (Raspberry Pi hardware access, small devices, ...) can be picked
      * from a list; the merged result is then shown for manual editing.
      */
-    static void promptJvmAndHardware(Console console, String jdkProvider, String defaultJvmOpts, String defaultUserGroups) {
-        boolean hasPrevious = (defaultJvmOpts != null && !defaultJvmOpts.isBlank())
-                || (defaultUserGroups != null && !defaultUserGroups.isBlank());
-        jvmOpts = defaultJvmOpts != null ? defaultJvmOpts.trim() : "";
-        userGroups = defaultUserGroups != null ? defaultUserGroups.trim() : "";
+    static void promptJvmAndHardware(Console console, InitConfig config) {
+        String jdkProvider = config.getJdkProvider();
+        String jvmOpts = config.getJvmOpts().trim();
+        String userGroups = config.getUserGroups().trim();
 
         boolean openJ9 = isOpenJ9(jdkProvider);
         var opts = new LinkedHashSet<String>();
         if (!jvmOpts.isEmpty()) opts.addAll(List.of(jvmOpts.split("\\s+")));
-        var dropped = opts.stream().filter(o -> isForOtherVm(o, openJ9)).toList();
+        var dropped = dropOtherVmOptions(opts, openJ9);
         if (!dropped.isEmpty()) {
-            opts.removeAll(dropped);
             jvmOpts = String.join(" ", opts);
+            config.setJvmOpts(jvmOpts);
             System.out.println("  Dropped JVM options for " + (openJ9 ? "HotSpot" : "OpenJ9") + " that " + jdkProvider
                     + " does not support: " + String.join(" ", dropped) + " (pick the presets again for equivalents)");
         }
 
-        String tune = prompt(console, "Configure hardware access / JVM options (yes/no)", hasPrevious ? "yes" : "no");
-        if (!"yes".equalsIgnoreCase(tune)) {
-            return;
+        if (!jvmOpts.isEmpty() || !userGroups.isEmpty()) {
+            // Values inherited from this or another target: make dropping them as easy as keeping them
+            System.out.println("Current hardware access / JVM options:");
+            System.out.println("  JVM options: " + (jvmOpts.isEmpty() ? "(none)" : jvmOpts));
+            System.out.println("  Extra groups: " + (userGroups.isEmpty() ? "(none)" : userGroups));
+            while (true) {
+                String choice = prompt(console, "Keep them, edit them, or clear and start from scratch (keep/edit/clear)", "keep").toLowerCase();
+                if (choice.equals("keep")) return;
+                if (choice.equals("edit")) break;
+                if (choice.equals("clear")) {
+                    userGroups = "";
+                    opts.clear();
+                    config.setJvmOpts("");
+                    config.setUserGroups("");
+                    String tune = prompt(console, "Configure hardware access / JVM options (yes/no)", "no");
+                    if (!"yes".equalsIgnoreCase(tune)) return;
+                    break;
+                }
+                System.err.println("  Answer keep, edit or clear");
+            }
+        } else {
+            String tune = prompt(console, "Configure hardware access / JVM options (yes/no)", "no");
+            if (!"yes".equalsIgnoreCase(tune)) {
+                return;
+            }
         }
 
         var presets = presets(jdkProvider);
@@ -1437,13 +1675,16 @@ public class Deploy {
 
         String mergedOpts = String.join(" ", opts);
         String mergedGroups = String.join(",", groups);
-        jvmOpts = prompt(console, "Extra JVM options", mergedOpts.isEmpty() ? null : mergedOpts).trim();
-        if (jvmOpts.contains("\"")) {
-            System.err.println("  Double quotes are not supported in JVM options (the value is written into a quoted systemd Environment= line)");
-            System.exit(1);
-        }
-        userGroups = prompt(console, "Extra groups for the app user (comma-separated)", mergedGroups.isEmpty() ? null : mergedGroups)
-                .replaceAll("\\s*,\\s*", ",").trim();
+        config.setJvmOpts(promptClearable(console, "Extra JVM options", mergedOpts).trim());
+        config.setUserGroups(promptClearable(console, "Extra groups for the app user (comma-separated)", mergedGroups)
+                .replaceAll("\\s*,\\s*", ",").trim());
+    }
+
+    /** Remove the flags the chosen VM does not support from opts, returning the removed ones. */
+    static List<String> dropOtherVmOptions(Collection<String> opts, boolean openJ9) {
+        var dropped = opts.stream().filter(o -> isForOtherVm(o, openJ9)).toList();
+        opts.removeAll(dropped);
+        return dropped;
     }
 
     static Preset findPreset(List<Preset> presets, String token) {
