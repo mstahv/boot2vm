@@ -82,6 +82,8 @@ public class Deploy {
     static final String SETUP_SCRIPT = """
             #!/bin/bash
             set -euo pipefail
+            # Never stop to ask (tzdata and friends would wait for an answer nobody gives)
+            export DEBIAN_FRONTEND=noninteractive
             APP_USER="$1"
             DOMAIN="$2"
             ADMIN_USER="${3:-root}"
@@ -140,6 +142,9 @@ public class Deploy {
                 echo "  Package manager is busy, retrying in 10s ..."
                 sleep 10
             done
+
+            # deploy syncs the app with rsync, which minimal images leave out
+            apt_install rsync
 
             # 1. Automatic security updates with nightly reboot if required
             echo "--- Configuring unattended-upgrades ---"
@@ -370,7 +375,7 @@ public class Deploy {
                 reverse_proxy localhost:$PORT
             }
             CADDY
-                systemctl reload caddy
+                systemctl reload-or-restart caddy
             else
                 echo "--- Skipping reverse proxy installation ---"
             fi
