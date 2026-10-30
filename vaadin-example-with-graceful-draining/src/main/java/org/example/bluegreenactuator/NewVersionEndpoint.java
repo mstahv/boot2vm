@@ -1,9 +1,9 @@
 package org.example.bluegreenactuator;
 
 import org.example.GracefulBlueGreenService;
+import org.jspecify.annotations.Nullable;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.WriteOperation;
-import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 /**
