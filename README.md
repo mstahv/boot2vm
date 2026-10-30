@@ -8,6 +8,16 @@ Also works for headless Java services that don't expose web endpoints (e.g. a Ra
 
 While the name says "VM", the tool is not technically tied to virtual machines or Ubuntu — any Debian-based server with `apt` should work. Tested successfully against Raspberry Pi OS as well.
 
+### Demo
+
+[![boot2vm demo: init a server, deploy a new version while users keep working](https://img.youtube.com/vi/EB6b7N_duG4/hqdefault.jpg)](https://www.youtube.com/watch?v=EB6b7N_duG4)
+
+The video sets up a server with the init form, then deploys new versions of a Vaadin app while users are using it. It shows all the bells and whistles, which are optional:
+
+ * **The browser windows** for `init` and `deploy` can be skipped: `--tui` asks the same questions and follows the deploy in the terminal.
+ * **Blue-green deployment** is optional: without it, a deploy just restarts the app in place, with a moment of downtime.
+ * **Graceful drain**, which lets users decide when they move to the new version, is optional on top of blue-green: without it, traffic switches to the new version as soon as it is healthy. With it, the app needs to implement a small API, see [Graceful drain mode](#graceful-drain-mode) (the [graceful-drain](graceful-drain) library does it for Vaadin apps).
+
 ### Pros
 
  * No OCI containers or Kubernetes — zero container overhead, no image registry, no need to think about how to build, ship, or compose images.
