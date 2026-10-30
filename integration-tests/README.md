@@ -42,6 +42,14 @@ mvn verify -Dit.test=GracefulDrainIT -Dit.video=target/videos -Dit.slowMo=300
 
 `timeline.txt` has the wall-clock milliseconds of when each recording started and of the main events, for lining them up.
 
+`promo/Promo.java` cuts them into one demo video with title cards and captions, the waits sped up and the two users side by side in sync (ffmpeg runs in Docker):
+
+```bash
+jbang promo/Promo.java    # target/promo/boot2vm-graceful-deploy.mp4
+```
+
+The cut points are tuned for the recordings at `-Dit.slowMo=300`; the user and terminal parts follow `timeline.txt`.
+
 Each command run in a container is echoed to the test output, see `target/failsafe-reports/*.xml`.
 
 ## Scenarios
