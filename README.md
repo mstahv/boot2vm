@@ -311,6 +311,10 @@ The `vaadin-example-with-graceful-draining/` directory contains a complete worki
 
 To test **automatic rollback**, uncomment the `System.exit(1)` line in the `@PostConstruct init()` method of `GracefulBlueGreenService`. The next deploy will start the new slot, fail the health check, stop the broken instance, and leave the previous version running. Use `Deploy logs inactive` to inspect the startup logs of the failed slot.
 
+## Tests
+
+`tests/LocalHttpsTest.java` checks the generated scripts and config handling without a server. `integration-tests/` runs `Deploy` end to end against Docker containers that act as servers. See [integration-tests/README.md](integration-tests/README.md).
+
 ## For later
 
  * Nginx as an alternative reverse proxy option

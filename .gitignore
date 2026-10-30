@@ -1,3 +1,6 @@
 vaadin-example-with-graceful-draining/target
 vaadin-example-with-graceful-draining/src/main/frontend
 /.idea/
+/integration-tests/target/
+/integration-tests/apps/*/target/
+.DS_Store
