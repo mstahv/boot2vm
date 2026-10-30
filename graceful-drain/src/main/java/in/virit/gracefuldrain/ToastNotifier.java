@@ -7,6 +7,7 @@ import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.orderedlayout.FlexComponent;
 import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
+import com.vaadin.flow.component.orderedlayout.VerticalLayout;
 import com.vaadin.flow.dom.Style;
 
 /**
@@ -27,29 +28,36 @@ public class ToastNotifier extends AbstractUpgradeNotifier {
             setPosition(getNotificationPosition());
             setDuration(0);
             addThemeName("primary");
-            add(new HorizontalLayout() {{
-                setAlignItems(FlexComponent.Alignment.CENTER);
-                add(VaadinIcon.REFRESH.create());
-                add(new Div() {{
-                    setMinWidth("16em");
+            // Two rows, so that the button fits however narrow the notification is
+            add(new VerticalLayout() {{
+                setPadding(false);
+                setSpacing(false);
+                getStyle().setGap("0.5em");
+                var text = new Div() {{
                     add(new Div(newVersionMessage()) {{
                         getStyle().setFontWeight("600");
                     }});
                     add(deadlineText(event));
-                }});
-                add(new Button(updateButtonText(), e -> event.upgradeNow()) {{
-                    addThemeVariants(ButtonVariant.SMALL);
-                    // stands out on the primary colored notification, in Lumo and Aura
-                    getStyle().setBackgroundColor("white");
-                    getStyle().setColor("var(--lumo-primary-text-color, var(--aura-accent-color, #0068d6))");
-                }});
-                add(new Button(VaadinIcon.CLOSE_SMALL.create(), e -> {
+                }};
+                add(new HorizontalLayout(VaadinIcon.REFRESH.create(), text, new Button(VaadinIcon.CLOSE_SMALL.create(), e -> {
                     close();
                     event.getUI().add(new Reminder(event));
                 }) {{
                     addThemeVariants(ButtonVariant.TERTIARY, ButtonVariant.SMALL);
                     getStyle().setColor("inherit");
                     setAriaLabel("Close");
+                }}) {{
+                    setWidthFull();
+                    setAlignItems(FlexComponent.Alignment.START);
+                    setFlexGrow(1, text);
+                }});
+                add(new Button(updateButtonText(), e -> event.upgradeNow()) {{
+                    addThemeVariants(ButtonVariant.SMALL);
+                    // Stands out on Lumo's primary colored notification, and on Aura's light one
+                    getStyle().setBackgroundColor("white");
+                    getStyle().setColor("var(--lumo-primary-text-color, var(--aura-accent-color, #0068d6))");
+                    getStyle().setBorder("1px solid var(--aura-accent-color, transparent)");
+                    setAlignSelf(FlexComponent.Alignment.END, this);
                 }});
             }});
         }

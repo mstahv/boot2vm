@@ -73,8 +73,12 @@ public class Promo {
                 clicked = seconds(DEPLOY, "update clicked"), done = seconds(DEPLOY, "deploy done");
         var deployAndUsers = List.of(DEPLOY, USER_A, USER_B, USER_C);
         card("2. Deploy a new version", "Three users are in the app while the developer deploys", 3);
-        grid(deployAndUsers, seconds(DEPLOY, "deploy window shown"), announced - 3, 2, "2× speed",
-                caption("The deploy builds, uploads and starts version 2 next to version 1.\nThe users keep working on version 1."));
+        double shown = seconds(DEPLOY, "deploy window shown");
+        hold(deployAndUsers, shown, 6,
+                caption("Three users on version 1: A in a view that keeps them on their version,\n"
+                        + "B in an @AutoUpgrade view, C with unsaved notes in a form"));
+        grid(deployAndUsers, shown, announced - 3, 2, "2× speed",
+                caption("The developer starts the deploy: build, upload,\nversion 2 starts next to version 1"));
         double t = announced - 3; // the next part starts here
         grid(deployAndUsers, t, saved + 3, 1, null,
                 caption("Version 2 is up: the users are told about it", 0, announced - t),
@@ -156,6 +160,16 @@ public class Promo {
      */
     void grid(List<Window> windows, double start, double end, double speed, String badge, String... captions)
             throws Exception {
+        grid(windows, start, end, speed, badge, 0, captions);
+    }
+
+    /** The windows still at the given moment, for the given seconds. */
+    void hold(List<Window> windows, double at, double seconds, String... captions) throws Exception {
+        grid(windows, at, at + 0.1, 1, null, seconds, captions);
+    }
+
+    void grid(List<Window> windows, double start, double end, double speed, String badge, double hold,
+              String... captions) throws Exception {
         Window deploy = windows.getFirst();
         var inputs = new ArrayList<String>();
         var graph = new ArrayList<String>();
@@ -175,6 +189,7 @@ public class Promo {
         // Between the windows, where it covers nothing that matters
         if (badge != null) overlays.add(badge(badge, "(w-text_w)/2", windows.size() <= 2 ? "150" : "(" + H + "-text_h)/2"));
         overlays.addAll(List.of(captions));
+        if (hold > 0) overlays.addFirst("tpad=stop_mode=clone:stop_duration=" + hold);
         graph.add("[o" + windows.size() + "]" + String.join(",", overlays) + "[out]");
         var args = new ArrayList<>(inputs);
         args.addAll(List.of("-filter_complex", String.join(";", graph), "-map", "[out]"));
