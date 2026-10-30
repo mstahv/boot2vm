@@ -38,12 +38,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * one in a view marked for automatic upgrades is moved right away, the other one
  * is told about the new version and moves when clicking "Update now!".
  * <p>
- * With -Dit.video=dir every step is recorded: the init form, the deploy in the
- * terminal (replayed in xterm.js) and both users' browsers, with a timeline.txt
- * of when each recording started, for putting them together.
+ * The deploy is followed in the deploy window. A third deploy shows its "Move them
+ * now" button, for a user who doesn't get around to updating.
+ * <p>
+ * With -Dit.video=dir every window is recorded, with a timeline.txt of when each
+ * recording started and when things happened, for putting them together.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class GracefulDrainIT {
+
+    /** The deploy window is narrower, to fit next to the users in the demo video. */
+    static final int DEPLOY_WIDTH = 880, DEPLOY_HEIGHT = 820;
 
     static final Path VIDEO_DIR = System.getProperty("it.video") == null ? null : Path.of(System.getProperty("it.video"));
 
@@ -96,7 +101,7 @@ class GracefulDrainIT {
         var window = new Window("1-init");
         var page = window.page;
         var init = workstation.initWithForm(app);
-        openForm(page, init);
+        open(page, workstation.formUrl(), init, "vaadin-button");
 
         field(page, "Target name").fill("vm1");
         field(page, "Host").fill("vm1");
@@ -138,8 +143,9 @@ class GracefulDrainIT {
 
         workstation.sh(app, "sed -i 's/\"Graceful Blue-Green Demo\"/\"Graceful Blue-Green Demo, version 2\"/'"
                 + " src/main/java/org/example/ApplicationLayout.java");
-        timeline("2-deploy-terminal");
-        var deploy = workstation.recordTerminal(app, "jbang /work/Deploy.java");
+        var window = new Window("2-deploy-window", DEPLOY_WIDTH, DEPLOY_HEIGHT);
+        var deploy = workstation.deployWithGui(app);
+        open(window.page, workstation.formUrl() + "deploy", deploy, "vaadin-progress-bar");
 
         assertThat(auto.page.getByText("You were automatically moved to a new version"))
                 .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(Duration.ofMinutes(15).toMillis()));
@@ -149,6 +155,8 @@ class GracefulDrainIT {
         assertThat(pinned.page.getByText("New version available!")).isVisible();
         timeline("new version announced");
         assertThat(pinned.page.getByText("Graceful Blue-Green Demo, version 2")).not().isVisible();
+        // The deploy waits for the user who stays
+        assertThat(window.page.getByText("1 user is still on the old version")).isVisible();
         // Let the user finish what they were doing, then update
         pinned.page.waitForTimeout(VIDEO_DIR != null ? 8000 : 1000);
         pinned.page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Update now!")).click();
@@ -161,22 +169,64 @@ class GracefulDrainIT {
         auto.page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName("Main (pinned)")).click();
         assertThat(auto.page.getByText(Pattern.compile("^Current slot: "))).not().hasText(oldSlot);
 
-        var recording = deploy.get(5, TimeUnit.MINUTES);
+        assertThat(window.page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Deployed to @vm1")))
+                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(60_000));
         timeline("deploy done");
-        assertEquals(0, recording.exitCode(), "deploy failed");
-        assertTrue(recording.output().contains("All users drained"), "the deploy must wait for the users to move");
-        assertTrue(recording.output().contains("Graceful blue-green deploy complete"));
-        pause(pinned.page);
+        pause(window.page);
+        window.close();
         pinned.close();
         auto.close();
 
-        if (VIDEO_DIR != null) {
-            // Not real time: the deploy is replayed now, its real start is in the timeline
-            var terminal = new Window("2-deploy-terminal", 1280, 720, false);
-            recording.play(terminal.page, "\u001B[1;32mdeveloper@laptop\u001B[0m:\u001B[1;34m~/demo\u001B[0m$ ",
-                    "jbang Deploy.java");
-            terminal.close();
-        }
+        var result = deploy.get(1, TimeUnit.MINUTES);
+        assertEquals(0, result.exitCode(), "deploy failed");
+        assertTrue(result.output().contains("All users drained"), "the deploy must wait for the users to move");
+        assertTrue(result.output().contains("Graceful blue-green deploy complete"));
+    }
+
+    @Test
+    @Order(3)
+    void deployWindowFollowsTheDrainAndMovesTheUsersOnRequest() throws Exception {
+        // A user who doesn't get around to updating
+        var user = new Window("6-user-moved");
+        user.page.navigate("http://vm1/");
+        var slot = user.page.getByText(Pattern.compile("^Current slot: "));
+        assertThat(slot).isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(60_000));
+        String oldSlot = slot.textContent();
+
+        workstation.sh(app, "sed -i 's/Demo, version 2/Demo, version 3/' src/main/java/org/example/ApplicationLayout.java");
+        var window = new Window("5-deploy-window", DEPLOY_WIDTH, DEPLOY_HEIGHT);
+        var deploy = workstation.deployWithGui(app);
+        open(window.page, workstation.formUrl() + "deploy", deploy, "vaadin-progress-bar");
+        assertThat(window.page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Deploying"))).isVisible();
+
+        // The windows closed in the previous test may still count, until Vaadin misses their heartbeats
+        assertThat(window.page.getByText(Pattern.compile("users? (is|are) still on the old version")))
+                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(Duration.ofMinutes(15).toMillis()));
+        timeline("move: drain shown");
+        assertThat(window.page.getByText(Pattern.compile("moved anyway in \\d+:\\d\\d"))).isVisible();
+        assertThat(user.page.getByText("New version available!")).isVisible();
+        window.page.waitForTimeout(VIDEO_DIR != null ? 6000 : 1000);
+        window.page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Move them now")).click();
+        timeline("move: clicked");
+
+        assertThat(window.page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Deployed to @vm1")))
+                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(120_000));
+        timeline("move: deploy done");
+        assertThat(window.page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName("Open http://vm1/"))).isVisible();
+        pause(window.page);
+        // The old version is gone under the user, who lands on the new one with an apology
+        assertThat(user.page.getByText("sorry for the interruption"))
+                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(60_000));
+        timeline("move: user moved");
+        assertThat(user.page.getByText("Graceful Blue-Green Demo, version 3")).isVisible();
+        assertThat(slot).not().hasText(oldSlot);
+        pause(user.page);
+        window.close();
+        user.close();
+
+        var result = deploy.get(1, TimeUnit.MINUTES);
+        assertEquals(0, result.exitCode(), "deploy failed");
+        assertTrue(result.output().contains("Operator requested force-cutover"), "the button must cut over");
     }
 
     /** A browser window of its own (no shared cookies), recorded as name.webm with -Dit.video. */
@@ -186,16 +236,16 @@ class GracefulDrainIT {
         final Page page;
 
         Window(String name) {
-            this(name, 1280, 800, true);
+            this(name, 1280, 800);
         }
 
-        Window(String name, int width, int height, boolean inTimeline) {
+        Window(String name, int width, int height) {
             this.name = name;
             var options = new Browser.NewContextOptions().setViewportSize(width, height);
             if (VIDEO_DIR != null) options.setRecordVideoDir(VIDEO_DIR.resolve("raw")).setRecordVideoSize(width, height);
             context = browser.newContext(options);
             page = context.newPage();
-            if (inTimeline) timeline(name);
+            timeline(name);
         }
 
         void close() {
@@ -231,15 +281,16 @@ class GracefulDrainIT {
         return page.getByRole(AriaRole.CHECKBOX, new Page.GetByRoleOptions().setName(label).setExact(true));
     }
 
-    static void openForm(Page page, CompletableFuture<Workstation.Result> init) {
+    /** Open a window of Deploy as soon as it is served, and wait for the selector. */
+    static void open(Page page, String url, CompletableFuture<Workstation.Result> deploy, String selector) {
         long deadline = System.currentTimeMillis() + Duration.ofMinutes(2).toMillis();
         while (true) {
-            if (init.isDone()) {
-                throw new AssertionError("Deploy exited before serving the form: " + init.join().output());
+            if (deploy.isDone()) {
+                throw new AssertionError("Deploy exited before serving " + url + ": " + deploy.join().output());
             }
             try {
-                page.navigate(workstation.formUrl());
-                page.waitForSelector("vaadin-button");
+                page.navigate(url);
+                page.waitForSelector(selector);
                 return;
             } catch (PlaywrightException e) {
                 if (System.currentTimeMillis() > deadline) throw e;

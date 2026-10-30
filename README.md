@@ -129,6 +129,8 @@ Builds and deploys the app. This is the default command — running `Deploy` (wi
  2. **Spring Boot:** extracts the fat jar for [efficient rsync](https://docs.spring.io/spring-boot/reference/packaging/efficient.html); **Quarkus:** uses the already-exploded `target/quarkus-app` directly
  3. Rsyncs to the server — only changed files are transferred (dependency jars rarely change)
 
+With `--gui`, the deploy is followed in a browser window: the current step, a progress bar and the latest output (the terminal still gets all of it). This is the default for targets with graceful drain, where the window also shows how many users are still on the old version, the countdown to the forced cutover and a *Move them now* button. `--tui` (or `BOOT2VM_TUI=1`) keeps the deploy in the terminal, as does a session without a display, like over SSH.
+
 When `BLUE_GREEN=yes`, the deploy performs a zero-downtime swap and includes an **automatic rollback**: the new slot is health-checked for up to 60 seconds before traffic is switched. If the new version fails to start or exits prematurely, the deploy script stops it, reports the failure, and leaves the current slot running untouched.
 
 ### `Deploy logs [n] [slot]`
@@ -274,7 +276,7 @@ When `BLUE_GREEN=yes`, you can additionally enable `BLUE_GREEN_GRACEFUL=yes` to 
 1. The new version is deployed to the inactive slot and health-checked as normal.
 2. Caddy is reconfigured to split traffic: users carrying a slot cookie (`X-Slot=blue`) continue to reach the old server; everyone else is routed to the new server.
 3. The old server is notified via `POST /actuator/new-version` with a `{"deadline":"<UTC timestamp>"}` body indicating when forced cutover will happen, so it can show a "New version available — upgrade by HH:mm UTC" banner.
-4. The deploy script polls `GET /actuator/active-users` on the old server every 10 s, waiting for `{"count": 0}`. Each poll prints the remaining time until forced cutover. Press **D** at any point to skip the drain and force an immediate cutover.
+4. The deploy script polls `GET /actuator/active-users` on the old server every 10 s, waiting for `{"count": 0}`. Each poll prints the remaining time until forced cutover. Press **D** at any point (or *Move them now* in the deploy window) to skip the drain and force an immediate cutover.
 5. Once drained (or `DRAIN_TIMEOUT` seconds have elapsed, or **D** was pressed), Caddy is switched to the new backend only and the old service is stopped.
 
 ### API contract the app must implement

@@ -9,7 +9,6 @@ import org.testcontainers.images.builder.Transferable;
 import org.testcontainers.utility.MountableFile;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -28,7 +27,7 @@ public class Workstation extends GenericContainer<Workstation> {
     /** The boot2vm checkout, i.e. where Deploy.java is. */
     static final Path ROOT = Path.of(System.getProperty("boot2vm.root", "..")).toAbsolutePath().normalize();
 
-    /** The port the init form is served on, see {@link #withInitForm()}. */
+    /** The port the init form and the deploy window are served on, see {@link #withInitForm()}. */
     static final int FORM_PORT = 8888;
 
     public record Result(int exitCode, String output) {
@@ -71,6 +70,12 @@ public class Workstation extends GenericContainer<Workstation> {
                         + String.join(" ", args)));
     }
 
+    /** Start a deploy followed in the browser, in the background, like {@link #initWithForm}. */
+    CompletableFuture<Result> deployWithGui(String dir) {
+        return CompletableFuture.supplyAsync(() -> sh(dir,
+                "SERVER_ADDRESS=0.0.0.0 SERVER_PORT=" + FORM_PORT + " jbang /work/Deploy.java deploy --gui"));
+    }
+
     /** Copy a project from apps/ to /work/{name} and return that directory. */
     String copyApp(String name) {
         copyFileToContainer(MountableFile.forHostPath(Path.of("apps", name)), "/work/" + name);
@@ -106,20 +111,6 @@ public class Workstation extends GenericContainer<Workstation> {
     void copyFromLocalRepository(String path) {
         Path dir = Path.of(System.getProperty("user.home"), ".m2", "repository", path);
         if (Files.isDirectory(dir)) copyFileToContainer(MountableFile.forHostPath(dir), "/root/.m2/repository/" + path);
-    }
-
-    /**
-     * Run a command in a terminal of 120x36 characters, recording what it shows with
-     * script(1), for {@link TerminalRecording#play}. The result completes when it exits.
-     */
-    CompletableFuture<TerminalRecording> recordTerminal(String dir, String command) {
-        return CompletableFuture.supplyAsync(() -> {
-            var result = sh(dir, "script -q -e -m classic -T /tmp/term.timing -O /tmp/term.out -c '"
-                    + "stty cols " + TerminalRecording.COLUMNS + " rows " + TerminalRecording.ROWS + "; " + command + "'");
-            return new TerminalRecording(command, result.exitCode(), result.output(),
-                    copyFileFromContainer("/tmp/term.out", InputStream::readAllBytes),
-                    copyFileFromContainer("/tmp/term.timing", in -> new String(in.readAllBytes())));
-        });
     }
 
     String publicKey() {

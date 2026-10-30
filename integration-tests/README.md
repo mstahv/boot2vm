@@ -36,19 +36,20 @@ mvn verify -Dit.test=GracefulDrainIT -Dit.video=target/videos -Dit.slowMo=300
 ```
 
 - `1-init.webm`: the init form, with blue-green and graceful drain on, and the setup until the app runs
-- `2-deploy-terminal.webm`: the deploy as the developer sees it in the terminal. It is recorded with `script` and replayed in [xterm.js](https://xtermjs.org/) afterwards, at the original pace.
+- `2-deploy-window.webm`: the deploy window (`deploy --gui`), waiting for the user who stays
 - `3-user-main.webm`: a user in a view that keeps them on their version: told about the new version, clicks *Update now!*
 - `4-user-info.webm`: a user in an `@AutoUpgrade` view, moved to the new version right away
+- `5-deploy-window.webm` and `6-user-moved.webm`: the next deploy, where the developer clicks *Move them now* for a user who doesn't update
 
 `timeline.txt` has the wall-clock milliseconds of when each recording started and of the main events, for lining them up.
 
-`promo/Promo.java` cuts them into one demo video with title cards and captions, the waits sped up and the two users side by side in sync (ffmpeg runs in Docker):
+`promo/Promo.java` cuts them into one demo video with title cards and captions, the waits sped up and the deploy window next to the users' windows, in sync (ffmpeg runs in Docker):
 
 ```bash
 jbang promo/Promo.java    # target/promo/boot2vm-graceful-deploy.mp4
 ```
 
-The cut points are tuned for the recordings at `-Dit.slowMo=300`; the user and terminal parts follow `timeline.txt`.
+The cut points of the init part are tuned for the recordings at `-Dit.slowMo=300`; the deploy parts follow `timeline.txt`.
 
 Each command run in a container is echoed to the test output, see `target/failsafe-reports/*.xml`.
 
@@ -58,7 +59,7 @@ Done:
 
 - `PlainAppIT`: init a fresh server with the terminal UI (checking the suggested defaults), serve a plain jar through Caddy with an env var from init, redeploy a changed version.
 - `InitFormIT`: the same with the init form, filled in with Playwright, following the setup in the window to the link to the app; a host that doesn't resolve, reported in the window with the ssh error; and a new target that inherits Raspberry Pi settings from the first: the presets show them, unticking and *Clear* remove them, and *Cancel* writes nothing.
-- `GracefulDrainIT`: the Vaadin example in `../vaadin-example-with-graceful-draining` with the graceful-drain library built from `../graceful-drain`. Init with the form (blue-green, graceful drain), then a deploy while two users are in the app: the one in an `@AutoUpgrade` view moves to the new version at once, the deploy waits for the other one until they click *Update now!*. The example needs viritin 3.9.2-SNAPSHOT, which is copied from your `~/.m2` until it is released.
+- `GracefulDrainIT`: the Vaadin example in `../vaadin-example-with-graceful-draining` with the graceful-drain library built from `../graceful-drain`. Init with the form (blue-green, graceful drain), then a deploy followed in the deploy window while two users are in the app: the one in an `@AutoUpgrade` view moves to the new version at once, the deploy waits for the other one until they click *Update now!*. A third deploy moves a user who stays with the window's *Move them now* button. The example needs viritin 3.9.2-SNAPSHOT, which is copied from your `~/.m2` until it is released.
 
 TODO:
 
@@ -66,7 +67,7 @@ TODO:
 - `env set/remove`, `add-key`, `logs`, `clean`
 - Headless service: no Caddy, nothing on port 80
 - Blue-green: poll during a deploy, no failed requests
-- Graceful drain: the forced cutover at the deadline, and the form view that upgrades when saved
+- Graceful drain: the forced cutover at the deadline, the D key in the terminal, and the form view that upgrades when saved
 - `HTTPS=internal` and `root-cert`: curl with `--cacert`
 - Zulu and Semeru, and a non-root admin user with sudo
 - A "warm" vm image with the JDK and Caddy preinstalled, for faster scenarios

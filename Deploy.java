@@ -26,6 +26,8 @@ import com.vaadin.flow.component.progressbar.ProgressBar;
 import com.vaadin.flow.component.select.Select;
 import com.vaadin.flow.component.textfield.TextArea;
 import com.vaadin.flow.component.textfield.TextField;
+import com.vaadin.flow.router.BeforeEnterEvent;
+import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.PageTitle;
 import com.vaadin.flow.router.Route;
 import com.vaadin.flow.dom.Style;
@@ -36,12 +38,15 @@ import com.vaadin.open.Open;
 import in.virit.widgetset.jbang.ViritinJBangAutoconfiguration;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.boot.web.server.context.WebServerInitializedEvent;
 import org.springframework.context.event.EventListener;
 import org.vaadin.firitin.form.FormBinder;
 
 import java.io.*;
 import java.nio.file.*;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -704,6 +709,7 @@ public class Deploy {
             echo "--- Draining users from $ACTIVE_LABEL ($ACTIVE_SERVICE) (timeout: ${DRAIN_TIMEOUT}s) ---"
             ELAPSED=0
             COUNT="1"
+            OPERATOR_CUTOVER=""
             while [ "$ELAPSED" -lt "$DRAIN_TIMEOUT" ]; do
                 RESPONSE=$(curl -s --max-time 5 "http://localhost:$ACTIVE_MGMT_PORT$ACTIVE_USERS_PATH" 2>/dev/null || echo "")
                 COUNT=$(echo "$RESPONSE" | grep -oP '"count"\\s*:\\s*\\K[0-9]+' 2>/dev/null || echo "")
@@ -721,12 +727,13 @@ public class Deploy {
                 read -t 10 -r -s -n 1 key 2>/dev/null || true
                 if [ "${key}" = "d" ] || [ "${key}" = "D" ]; then
                     echo "Operator requested force-cutover — remaining users will be dropped to new slot"
+                    OPERATOR_CUTOVER=1
                     break
                 fi
                 ELAPSED=$((ELAPSED + 10))
             done
 
-            if [ "$COUNT" != "0" ]; then
+            if [ "$COUNT" != "0" ] && [ -z "$OPERATOR_CUTOVER" ]; then
                 echo "Forcing cutover after ${DRAIN_TIMEOUT}s"
             fi
 
@@ -780,7 +787,7 @@ public class Deploy {
         try {
             switch (command) {
                 case "init" -> init(selected, from, ui);
-                case "deploy" -> deployTargets(resolveTargets(selected, true));
+                case "deploy" -> deploy(resolveTargets(selected, true), ui);
                 case "logs" -> { loadConfig(singleTarget(selected, "logs")); logs(args); }
                 case "env" -> env(args, selected);
                 case "add-key" -> addKey(args, resolveTargets(selected, true));
@@ -915,6 +922,7 @@ public class Deploy {
         System.out.println("                   Opens a form in the browser; --tui (or BOOT2VM_TUI=1) asks in the terminal,");
         System.out.println("                   --gui serves the form even when no browser can be opened here");
         System.out.println("  deploy         - Build once, then sync and restart on every target (or the given @targets)");
+        System.out.println("                   --gui follows it in the browser (default with graceful drain), --tui in the terminal");
         System.out.println("  targets        - List the configured servers");
         System.out.println("  logs [n] [slot] - Tail the application logs (default: 200 lines)");
         System.out.println("                    slot: active (default), inactive, blue, green");
@@ -1077,7 +1085,7 @@ public class Deploy {
             InitResult result = promptInit(targetName, askName, from);
             runInit(result.target(), result.config());
         } else {
-            InitGui.run(targetName, askName, from);
+            Gui.init(targetName, askName, from);
         }
     }
 
@@ -1544,28 +1552,27 @@ public class Deploy {
     }
 
     /**
-     * Runs the init form as a local Spring Boot app on a random port and opens it
-     * in the browser. Once the form is submitted, the setup runs as in the terminal
-     * UI, and the window follows its progress until it is done.
+     * Runs a local Spring Boot app on a random port and opens it in the browser: the
+     * init form, or the progress of a deploy. The work itself runs as in the terminal,
+     * and the window follows its output until it is done.
      */
     @SpringBootApplication(exclude = ViritinJBangAutoconfiguration.class)
-    public static class InitGui {
+    public static class Gui {
         static String initialTarget, from;
         static boolean askName;
+        static List<Target> deployTargets;
         static final CompletableFuture<InitResult> result = new CompletableFuture<>();
-        static final Progress progress = new Progress();
+        static Progress progress = new Progress(Progress.SETUP_STEPS);
         static final Set<UI> windows = ConcurrentHashMap.newKeySet();
         /** Seconds between heartbeats of an open window, and silence after which init gives up. */
         static final int HEARTBEAT = 5, GIVE_UP = 30;
 
-        static void run(String targetName, boolean askName, String from) throws Exception {
-            InitGui.initialTarget = targetName;
-            InitGui.askName = askName;
-            InitGui.from = from;
+        static void init(String targetName, boolean askName, String from) throws Exception {
+            Gui.initialTarget = targetName;
+            Gui.askName = askName;
+            Gui.from = from;
             System.out.println("Opening the init form in your browser (add --tui to answer in the terminal instead) ...");
-            var context = new SpringApplicationBuilder(InitGui.class).logStartupInfo(false)
-                    // Only this machine may see the form; SERVER_ADDRESS and SERVER_PORT override for tests
-                    .properties("server.address=127.0.0.1", "vaadin.heartbeatInterval=" + HEARTBEAT).run();
+            var context = start();
             // The browser doesn't say when its window closes, but its heartbeats stop
             var watchdog = Executors.newSingleThreadScheduledExecutor();
             watchdog.scheduleWithFixedDelay(() -> {
@@ -1586,21 +1593,43 @@ public class Deploy {
                 follow(() -> runInit(init.target(), init.config()));
             } finally {
                 watchdog.shutdownNow();
-                Thread.sleep(500); // let the last response reach the browser
-                context.close();
+                stop(context);
             }
         }
 
-        interface Setup { void run() throws Exception; }
+        static void deploy(List<Target> targets) throws Exception {
+            Gui.deployTargets = targets;
+            progress = new Progress(Progress.DEPLOY_STEPS);
+            System.out.println("Following the deploy in your browser (add --tui to stay in the terminal) ...");
+            var context = start();
+            try {
+                follow(() -> deployTargets(targets));
+            } finally {
+                stop(context);
+            }
+        }
 
-        /** Run the setup, copying everything it prints to the progress shown in the window. */
-        static void follow(Setup setup) throws Exception {
+        static ConfigurableApplicationContext start() {
+            return new SpringApplicationBuilder(Gui.class).logStartupInfo(false)
+                    // Only this machine may see the window; SERVER_ADDRESS and SERVER_PORT override for tests
+                    .properties("server.address=127.0.0.1", "vaadin.heartbeatInterval=" + HEARTBEAT).run();
+        }
+
+        static void stop(ConfigurableApplicationContext context) throws InterruptedException {
+            Thread.sleep(500); // let the last response reach the browser
+            context.close();
+        }
+
+        interface Work { void run() throws Exception; }
+
+        /** Run the work, copying everything it prints to the progress shown in the window. */
+        static void follow(Work work) throws Exception {
             PrintStream out = System.out, err = System.err;
             System.setOut(new PrintStream(progress.new Tee(out), true, out.charset()));
             System.setErr(new PrintStream(progress.new Tee(err), true, err.charset()));
             captureOutput = true;
             try {
-                setup.run();
+                work.run();
                 progress.finish(null);
             } catch (Exception e) {
                 progress.finish(e.getMessage() != null ? e.getMessage() : e.toString());
@@ -1616,8 +1645,13 @@ public class Deploy {
 
         @EventListener
         void serverStarted(WebServerInitializedEvent event) {
-            String url = "http://localhost:" + event.getWebServer().getPort();
-            System.out.println("Init form at " + url + " (closing the window cancels init after " + GIVE_UP + " seconds)");
+            String url = "http://localhost:" + event.getWebServer().getPort() + "/";
+            if (deployTargets == null) {
+                System.out.println("Init form at " + url + " (closing the window cancels init after " + GIVE_UP + " seconds)");
+            } else {
+                url += "deploy";
+                System.out.println("Deploy progress at " + url + " (closing the window doesn't stop the deploy)");
+            }
             try {
                 Open.open(url);
             } catch (Exception e) {
@@ -1640,13 +1674,13 @@ public class Deploy {
     }
 
     /**
-     * What the setup has printed so far: the last lines, the current step and a rough
-     * share done, judged by the steps it announces.
+     * What the work has printed so far: the last lines, the current step, a rough share
+     * done judged by the steps it announces, and how a graceful drain is going.
      */
     static class Progress {
         static final int TAIL = 14;
-        /** The steps the setup prints, with how far along each one starts. */
-        static final Map<String, Double> STEPS = Map.ofEntries(
+        /** The steps init prints, with how far along each one starts. */
+        static final Map<String, Double> SETUP_STEPS = Map.ofEntries(
                 Map.entry("Initializing server", 0.02),
                 Map.entry("--- Configuring unattended-upgrades", 0.06),
                 Map.entry("--- Turning off unattended-upgrades", 0.06),
@@ -1660,36 +1694,84 @@ public class Deploy {
                 Map.entry("Building application", 0.7),
                 Map.entry("Syncing to server", 0.85),
                 Map.entry("Running blue-green", 0.92),
+                Map.entry("Running graceful blue-green", 0.92),
                 Map.entry("Restarting service", 0.95));
+        /** The steps a deploy prints. */
+        static final Map<String, Double> DEPLOY_STEPS = Map.ofEntries(
+                Map.entry("Building application", 0.02),
+                Map.entry("Reading active slot", 0.4),
+                Map.entry("Syncing to server", 0.45),
+                Map.entry("Running blue-green", 0.6),
+                Map.entry("Running graceful blue-green", 0.6),
+                Map.entry("--- Starting", 0.62),
+                Map.entry("--- Health check", 0.65),
+                Map.entry("--- Writing drain-mode", 0.72),
+                Map.entry("--- Draining users", 0.75),
+                Map.entry("--- Swapping Caddy", 0.9),
+                Map.entry("--- Switching Caddy", 0.9),
+                Map.entry("--- Stopping", 0.95),
+                Map.entry("Restarting service", 0.9));
+        static final Pattern BANNER = Pattern.compile("^(?:---|===) (.+?) (?:---|===)$");
+        static final Pattern DEADLINE = Pattern.compile("deadline: (\\S+)\\)");
+        static final Pattern REMAINING = Pattern.compile("^(\\d+) users remaining");
+
+        final Map<String, Double> steps;
         final Deque<String> tail = new ArrayDeque<>();
         final CountDownLatch shown = new CountDownLatch(1);
         String step = "Starting";
         double done;
-        boolean finished;
+        boolean finished, draining;
         String failure;
+        Integer users;
+        Instant deadline;
 
-        record Snapshot(String step, double done, String tail, boolean finished, String failure) {}
+        Progress(Map<String, Double> steps) {
+            this.steps = steps;
+        }
+
+        record Snapshot(String step, double done, String tail, boolean finished, String failure,
+                        boolean draining, Integer users, Instant deadline) {}
 
         synchronized Snapshot snapshot() {
-            return new Snapshot(step, done, String.join("\n", tail), finished, failure);
+            return new Snapshot(step, done, String.join("\n", tail), finished, failure, draining, users, deadline);
         }
 
         synchronized void line(String line) {
             line = line.replaceAll("\u001B\\[[0-9;?]*[A-Za-z]", "");
             tail.add(line);
             if (tail.size() > TAIL) tail.removeFirst();
-            var banner = Pattern.compile("^(?:---|===) (.+?) (?:---|===)$").matcher(line);
+            var banner = BANNER.matcher(line);
             if (banner.matches()) step = banner.group(1);
-            for (var s : STEPS.entrySet()) {
+            for (var s : steps.entrySet()) {
                 if (line.startsWith(s.getKey())) {
                     if (!line.startsWith("-")) step = line.replaceFirst(" \\.\\.\\.$", "");
                     done = Math.max(done, s.getValue());
                 }
             }
+            drain(line);
+        }
+
+        /** Follow the drain loop of the graceful blue-green script. */
+        void drain(String line) {
+            var deadline = DEADLINE.matcher(line);
+            if (line.startsWith("--- Notifying old server") && deadline.find()) {
+                this.deadline = Instant.parse(deadline.group(1));
+            } else if (line.startsWith("--- Draining users")) {
+                draining = true;
+                users = null;
+            } else if (REMAINING.matcher(line).find()) {
+                var remaining = REMAINING.matcher(line);
+                remaining.find();
+                users = Integer.parseInt(remaining.group(1));
+            } else if (line.startsWith("All users drained") || line.startsWith("Operator requested")
+                    || line.startsWith("Forcing cutover") || line.startsWith("--- Switching Caddy")) {
+                draining = false;
+            }
         }
 
         synchronized void finish(String failure) {
             finished = true;
+            draining = false;
             this.failure = failure;
             if (failure == null) done = 1;
         }
@@ -1730,22 +1812,21 @@ public class Deploy {
         }
     }
 
-    /** Replaces the form once it is submitted: follows the setup until it ends. */
-    public static class SetupView extends VerticalLayout {
-        final InitResult init;
+    /** Follows the work in the terminal: the current step, a progress bar and the latest output. */
+    public abstract static class ProgressView extends VerticalLayout {
         final H2 title;
         final Span step = new Span();
         final ProgressBar bar = new ProgressBar();
+        final DrainPanel drain = new DrainPanel();
         final Output output = new Output();
         Registration polling;
 
-        SetupView(InitResult init) {
-            this.init = init;
-            title = new H2("Setting up " + init.config().getHost());
+        ProgressView(String title, String intro) {
+            this.title = new H2(title);
             setPadding(false);
             bar.setWidthFull();
-            add(title, new Paragraph("The settings went to " + init.target().path()
-                    + ". Below is the latest output, the terminal has all of it."), step, bar, output);
+            add(this.title, new Paragraph(intro + "Below is the latest output, the terminal has all of it."),
+                    step, bar, drain, output);
             addAttachListener(e -> {
                 e.getUI().setPollInterval(500);
                 polling = e.getUI().addPollListener(p -> update());
@@ -1754,38 +1835,42 @@ public class Deploy {
         }
 
         void update() {
-            var p = InitGui.progress.snapshot();
+            var p = Gui.progress.snapshot();
             step.setText(p.step());
             bar.setValue(p.done());
+            drain.update(p);
             output.setText(p.tail());
             if (!p.finished()) return;
 
             polling.remove();
             getUI().ifPresent(ui -> {
                 ui.setPollInterval(-1);
-                ui.beforeClientResponse(this, ctx -> InitGui.progress.shown.countDown());
+                // Deploy stops serving this window in a moment: no "connection lost" over the result
+                ui.getPage().executeJs("const style = document.createElement('style');"
+                        + "style.textContent = 'vaadin-connection-indicator { display: none !important; }';"
+                        + "document.head.append(style);");
+                ui.beforeClientResponse(this, ctx -> Gui.progress.shown.countDown());
             });
             if (p.failure() == null) {
-                title.setText("@" + init.target().name() + " is ready");
-                step.setText("Server set up and app deployed. You can close this window.");
-                String url = appUrl();
-                if (url != null) add(new Paragraph(new Anchor(url, "Open " + url)));
+                succeeded();
             } else {
-                title.setText("Setup failed");
                 bar.setVisible(false);
                 step.setText(p.failure());
                 step.getStyle().setColor("var(--aura-red, #c62828)").setFontWeight(Style.FontWeight.BOLD);
-                add(new Paragraph("Fix the problem and run init again, the form will start from the settings in "
-                        + init.target().path() + "."));
+                failed();
             }
         }
 
-        /** Where the deployed app answers, null if it is not a web service. */
-        String appUrl() {
-            InitConfig c = init.config();
-            if (!c.isWebService()) return null;
+        abstract void succeeded();
+
+        abstract void failed();
+
+        /** A link to where the deployed app answers, null if it is not a web service. */
+        static Anchor appLink(InitConfig c) {
+            if (!c.isWebService() || c.getDomain() == null) return null;
             String scheme = "no".equals(c.getHttps()) ? "http" : "https";
-            return scheme + "://" + c.getDomain().split(" ")[0] + "/";
+            String url = scheme + "://" + c.getDomain().trim().split("[\\s,]+")[0] + "/";
+            return new Anchor(url, "Open " + url);
         }
 
         static class Output extends Pre {
@@ -1803,11 +1888,114 @@ public class Deploy {
                         .setOverflow(Style.Overflow.HIDDEN);
             }
         }
+
+        /**
+         * While a graceful deploy waits for the users of the old version: how many are left,
+         * when they are moved anyway, and a button to move them now.
+         */
+        static class DrainPanel extends VerticalLayout {
+            final H3 users = new H3();
+            final Span deadline = new Span();
+            final Button moveNow = new Button("Move them now", e -> moveNow());
+
+            DrainPanel() {
+                setVisible(false);
+                setSpacing(false);
+                getStyle().setBorderRadius("6px").setBackgroundColor("rgba(127, 127, 127, 0.12)");
+                moveNow.addThemeVariants(ButtonVariant.PRIMARY);
+                add(users, new Paragraph("They have been told about the new version and keep their work until they "
+                        + "move. The deploy continues as soon as no one is left on the old version."), deadline, moveNow);
+            }
+
+            void update(Progress.Snapshot p) {
+                setVisible(p.draining());
+                if (!p.draining()) return;
+                users.setText(p.users() == null ? "Checking for users of the old version"
+                        : p.users() + (p.users() == 1 ? " user is" : " users are") + " still on the old version");
+                if (p.deadline() != null) {
+                    long left = Math.max(0, Duration.between(Instant.now(), p.deadline()).toSeconds());
+                    deadline.setText("They are moved anyway in %d:%02d".formatted(left / 60, left % 60));
+                }
+            }
+
+            void moveNow() {
+                pressKey('d');
+                moveNow.setEnabled(false);
+                moveNow.setText("Moving them ...");
+            }
+        }
+    }
+
+    /** Replaces the form once it is submitted: follows the setup until it ends. */
+    public static class SetupView extends ProgressView {
+        final InitResult init;
+
+        SetupView(InitResult init) {
+            super("Setting up " + init.config().getHost(), "The settings went to " + init.target().path() + ". ");
+            this.init = init;
+        }
+
+        @Override
+        void succeeded() {
+            title.setText("@" + init.target().name() + " is ready");
+            step.setText("Server set up and app deployed. You can close this window.");
+            var link = appLink(init.config());
+            if (link != null) add(new Paragraph(link));
+        }
+
+        @Override
+        void failed() {
+            title.setText("Setup failed");
+            add(new Paragraph("Fix the problem and run init again, the form will start from the settings in "
+                    + init.target().path() + "."));
+        }
+    }
+
+    @Route("deploy")
+    @PageTitle("boot2vm deploy")
+    public static class DeployView extends ProgressView implements BeforeEnterObserver {
+
+        public DeployView() {
+            super("Deploying " + Path.of("").toAbsolutePath().getFileName() + " to " + targetNames(), "");
+            setPadding(true);
+            setMaxWidth("52rem");
+            getStyle().setMargin("0 auto");
+        }
+
+        static String targetNames() {
+            return Gui.deployTargets == null ? "" : Gui.deployTargets.stream()
+                    .map(t -> "@" + t.name()).collect(Collectors.joining(", "));
+        }
+
+        @Override
+        public void beforeEnter(BeforeEnterEvent event) {
+            if (Gui.deployTargets == null) event.forwardTo(InitView.class);
+        }
+
+        @Override
+        void succeeded() {
+            title.setText("Deployed to " + targetNames());
+            step.setText("You can close this window.");
+            for (Target target : Gui.deployTargets) {
+                try {
+                    var link = appLink(InitConfig.load(target.path(), true));
+                    if (link != null) add(new Paragraph(link));
+                } catch (IOException e) {
+                    // Only a convenience, the terminal says where the app is
+                }
+            }
+        }
+
+        @Override
+        void failed() {
+            title.setText("Deploy failed");
+            add(new Paragraph("Fix the problem and deploy again."));
+        }
     }
 
     @Route("")
     @PageTitle("boot2vm init")
-    public static class InitView extends VerticalLayout {
+    public static class InitView extends VerticalLayout implements BeforeEnterObserver {
         final TargetSection target = new TargetSection();
         final ServerSection server = new ServerSection();
         final AppSection app = new AppSection();
@@ -1837,10 +2025,15 @@ public class Deploy {
             });
             target.name.addValueChangeListener(e -> target.validateName());
 
-            Target initial = Target.named(InitGui.initialTarget);
-            Path source = defaultsSource(initial, InitGui.from);
+            Target initial = Target.named(Gui.initialTarget);
+            Path source = defaultsSource(initial, Gui.from);
             target.setTargets(initial, source);
             edit(initDefaults(initial, source));
+        }
+
+        @Override
+        public void beforeEnter(BeforeEnterEvent event) {
+            if (Gui.deployTargets != null) event.forwardTo(DeployView.class);
         }
 
         InitConfig config() {
@@ -1900,7 +2093,7 @@ public class Deploy {
             var init = new InitResult(target.target(), c);
             removeAll();
             add(new SetupView(init));
-            InitGui.result.complete(init);
+            Gui.result.complete(init);
         }
 
         class Buttons extends HorizontalLayout {
@@ -1908,7 +2101,7 @@ public class Deploy {
                 var initialize = new Button("Initialize server", e -> submit());
                 initialize.addThemeVariants(ButtonVariant.PRIMARY);
                 add(initialize, new Button("Cancel", e -> {
-                    InitGui.result.cancel(false);
+                    Gui.result.cancel(false);
                     InitView.this.removeAll();
                     InitView.this.add(new H2("Init cancelled"), new Paragraph("Nothing was written. You can close this window."));
                 }));
@@ -1949,7 +2142,7 @@ public class Deploy {
 
         void setTargets(Target initial, Path source) throws IOException {
             List<Target> existing = allTargets();
-            if (InitGui.askName) {
+            if (Gui.askName) {
                 name.setValue(initial.name());
                 form.add(name);
             } else {
@@ -2501,6 +2694,24 @@ public class Deploy {
     record Build(String appType, boolean quarkus, boolean plain, boolean mavenw, boolean pom) {}
 
     /** Build once, then sync and restart on every given target in order. */
+    /**
+     * Deploy to the targets, following the progress in the browser when asked to, and by
+     * default for graceful drain, where the window shows the users left on the old version.
+     */
+    static void deploy(List<Target> targets, String ui) throws Exception {
+        boolean gui = "gui".equals(ui);
+        if (ui == null && guiUnavailableReason() == null) {
+            for (Target target : targets) {
+                if (InitConfig.load(target.path(), true).isGracefulDrain()) gui = true;
+            }
+        }
+        if (gui) {
+            Gui.deploy(targets);
+        } else {
+            deployTargets(targets);
+        }
+    }
+
     static void deployTargets(List<Target> targets) throws Exception {
         // One app has one build: check every config before building or touching any server
         loadConfig(targets.get(0));
@@ -3026,22 +3237,47 @@ public class Deploy {
         ssh(adminUser, command);
     }
 
+    /** Where {@link #pressKey} sends keys to the running remote command, while a window follows it. */
+    static volatile OutputStream remoteKeys;
+
+    /** Press a key for the remote command, as if typed in its terminal (the graceful drain's D). */
+    static void pressKey(char key) {
+        var keys = remoteKeys;
+        if (keys == null) return;
+        try {
+            keys.write(key);
+            keys.flush();
+        } catch (IOException e) {
+            // The command has just ended
+        }
+    }
+
     /** Like sshAsRoot but allocates a pseudo-terminal (-t) so remote interactive reads work. */
     static void sshAsRootInteractive(String command) throws Exception {
         if (!"root".equals(adminUser)) {
             command = "sudo " + command;
         }
-        var builder = new ProcessBuilder("ssh", "-t", "-i", sshKey, "-o", "StrictHostKeyChecking=accept-new",
-                adminUser + "@" + host, command);
+        // Followed in a window there is no terminal to allocate, the keys come from its buttons
+        var builder = new ProcessBuilder("ssh", captureOutput ? "-T" : "-t", "-i", sshKey,
+                "-o", "StrictHostKeyChecking=accept-new", adminUser + "@" + host, command);
         if (captureOutput) {
-            // Keyboard input still reaches the remote side, the output is copied to the init form
-            builder.redirectInput(ProcessBuilder.Redirect.INHERIT).redirectErrorStream(true);
+            builder.redirectErrorStream(true);
         } else {
             builder.inheritIO();
         }
         var process = builder.start();
-        if (captureOutput) process.getInputStream().transferTo(System.out);
-        int exit = process.waitFor();
+        int exit;
+        if (captureOutput) {
+            remoteKeys = process.getOutputStream();
+            try {
+                process.getInputStream().transferTo(System.out);
+                exit = process.waitFor();
+            } finally {
+                remoteKeys = null;
+            }
+        } else {
+            exit = process.waitFor();
+        }
         if (exit != 0) {
             throw new CommandFailed("Remote command failed (exit " + exit + ")", exit);
         }
