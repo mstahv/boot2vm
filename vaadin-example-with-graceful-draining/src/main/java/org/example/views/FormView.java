@@ -17,7 +17,6 @@ import in.virit.gracefuldrain.GracefulDrain;
 import in.virit.gracefuldrain.NewVersionEvent;
 import in.virit.gracefuldrain.NewVersionObserver;
 import org.vaadin.firitin.appframework.MenuItem;
-import org.vaadin.firitin.util.style.LumoProps;
 
 /**
  * Users are moved to a new version automatically only if they have no unsaved changes. As a
@@ -64,10 +63,10 @@ public class FormView extends VerticalLayout implements AutoUpgradeable, NewVers
             event.getDeadline().ifPresent(deadline ->
                     add(new Span(", or you'll be moved in "), new Countdown(deadline)));
             add(new Span("."));
-            getStyle().setBackgroundColor(LumoProps.WARNING_COLOR_10PCT.var());
-            getStyle().setBorderLeft("4px solid " + LumoProps.WARNING_COLOR.var());
-            getStyle().setPadding(LumoProps.SPACE_M.var());
-            getStyle().setBorderRadius(LumoProps.BORDER_RADIUS_M.var());
+            getStyle().setBackgroundColor("color-mix(in srgb, var(--aura-yellow) 18%, transparent)");
+            getStyle().setBorderLeft("4px solid var(--aura-yellow)");
+            getStyle().setPadding("var(--vaadin-padding-m)");
+            getStyle().setBorderRadius("var(--vaadin-radius-m)");
         }
     }
 }

@@ -17,7 +17,6 @@ import in.virit.gracefuldrain.GracefulDrain;
 import in.virit.gracefuldrain.ToastNotifier;
 import in.virit.gracefuldrain.UpgradeNotifier;
 import org.vaadin.firitin.appframework.MenuItem;
-import org.vaadin.firitin.util.style.LumoProps;
 
 import java.time.Instant;
 import java.util.function.Supplier;
@@ -43,7 +42,7 @@ public class MainView extends VerticalLayout {
                 NamedColor namedColor = NamedColor.of(slot);
                 getStyle().setBackgroundColor(namedColor.toRgbColor().withAlpha(0.2).toString());
                 getStyle().setBorder("4px solid " + namedColor.toString());
-                getStyle().setPadding(LumoProps.SPACE_M.var());
+                getStyle().setPadding("var(--vaadin-padding-m)");
             }
         }});
 

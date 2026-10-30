@@ -6,13 +6,12 @@ import com.vaadin.flow.router.Layout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.info.BuildProperties;
 import org.vaadin.firitin.appframework.MainLayout;
-import org.vaadin.firitin.util.style.LumoProps;
 
 @Layout
 public class ApplicationLayout extends MainLayout {
 
     private Div currentVersion = new Div("unknown"){{
-        getStyle().setFontSize(LumoProps.FONT_SIZE_XS.var());
+        getStyle().setFontSize("var(--aura-font-size-xs, 0.75rem)");
         getStyle().setTextAlign(Style.TextAlign.CENTER);
     }};
 

@@ -40,12 +40,14 @@ public class DrawerBadgeNotifier extends ToastNotifier {
             setSpacing(false);
             setPadding(true);
             setWidth("auto");
+            // Lumo's properties first, then Aura's and the base styles', so that both themes look right
             Style style = getStyle();
-            style.setMargin("var(--lumo-space-m, 1rem)");
-            style.setBorderRadius("var(--lumo-border-radius-l, 12px)");
-            style.setBackgroundColor("var(--lumo-primary-color-10pct, rgba(0, 106, 245, 0.1))");
+            style.setMargin("var(--lumo-space-m, var(--vaadin-padding-m, 1rem))");
+            style.setBorderRadius("var(--lumo-border-radius-l, var(--vaadin-radius-l, 12px))");
+            style.setBackgroundColor("var(--lumo-primary-color-10pct, "
+                    + "color-mix(in srgb, var(--aura-accent-color, #0068d6) 12%, transparent))");
             style.setTextAlign(Style.TextAlign.CENTER);
-            style.setGap("var(--lumo-space-s, 0.5rem)");
+            style.setGap("var(--lumo-space-s, var(--vaadin-gap-s, 0.5rem))");
             add(VaadinIcon.REFRESH.create());
             add(new Div(newVersionMessage()) {{
                 getStyle().setFontWeight("600");
