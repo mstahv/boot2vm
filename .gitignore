@@ -4,3 +4,4 @@ vaadin-example-with-graceful-draining/src/main/frontend
 /integration-tests/target/
 /integration-tests/apps/*/target/
 .DS_Store
+graceful-drain/target

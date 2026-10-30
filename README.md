@@ -299,17 +299,13 @@ When `BLUE_GREEN=yes`, you can additionally enable `BLUE_GREEN_GRACEFUL=yes` to 
 
 If `DRAIN_TIMEOUT` expires before the count reaches 0, the deploy script logs "Forcing cutover" and proceeds with the switch anyway, so a deploy is never stuck indefinitely. The operator can also press **D** at any time during the drain to trigger an immediate cutover without waiting for the timeout.
 
-### Example: Vaadin app with graceful draining
+### Vaadin apps: the graceful-drain library
 
-The `vaadin-example-with-graceful-draining/` directory contains a complete working example of the API contract above, built with Vaadin and Spring Boot. It demonstrates:
+For Vaadin apps, the `graceful-drain/` library (`in.virit:graceful-drain`) implements the whole contract: it pins UIs to their slot, counts them for `active-users`, shows users a countdown with an **Update now** button when a new version is available, moves users automatically where they have nothing to lose, and greets them on the new version. With Spring Boot it is a single dependency; see [graceful-drain/README.md](graceful-drain/README.md).
 
-- Reading `APP_SLOT` via `@Value("${app.slot:local}")` and using it as the cookie value
-- Pinning a user to the current slot on demand (sets the `X-Slot` cookie via `BrowserCookie`)
-- Tracking pinned UIs in a thread-safe set and exposing the count via `GET /actuator/active-users`
-- Receiving the `POST /actuator/new-version` notification with the deadline timestamp, and showing a dismissible "New version available — upgrade by HH:mm UTC" banner with an **Upgrade now** button
-- Distinguishing automatic, user-initiated, and forced migrations on the new server so each gets an appropriate welcome message
+The `vaadin-example-with-graceful-draining/` directory is a complete Spring Boot example using it. It shows a custom drawer badge instead of the default notification, a view moved to the new version automatically (`@AutoUpgrade`), and a form view moved automatically only when it has no unsaved changes (`AutoUpgradeable`).
 
-To test **automatic rollback**, uncomment the `System.exit(1)` line in the `@PostConstruct init()` method of `GracefulBlueGreenService`. The next deploy will start the new slot, fail the health check, stop the broken instance, and leave the previous version running. Use `Deploy logs inactive` to inspect the startup logs of the failed slot.
+To test **automatic rollback**, uncomment the `System.exit(1)` line in the example's `Application.main`. The next deploy will start the new slot, fail the health check, stop the broken instance, and leave the previous version running. Use `Deploy logs inactive` to inspect the startup logs of the failed slot.
 
 ## Tests
 

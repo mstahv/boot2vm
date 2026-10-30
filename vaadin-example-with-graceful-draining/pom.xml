@@ -37,11 +37,17 @@
             <artifactId>vaadin-spring-boot-starter</artifactId>
         </dependency>
 
-        <!-- Helper library to set "programmable cookie API" -->
+        <!-- Keeps users on the old version during boot2vm's graceful blue-green deployments -->
+        <dependency>
+            <groupId>in.virit</groupId>
+            <artifactId>graceful-drain</artifactId>
+            <version>0.1-SNAPSHOT</version>
+        </dependency>
+
         <dependency>
             <groupId>in.virit</groupId>
             <artifactId>viritin</artifactId>
-            <version>3.9.1</version>
+            <version>3.9.2-SNAPSHOT</version>
         </dependency>
 
         <dependency>
@@ -79,6 +85,10 @@
                         <goals>
                             <goal>build-info</goal>
                         </goals>
+                        <configuration>
+                            <!-- Actual build time instead of the fixed reproducible-build timestamp, shown in the UI to tell versions apart -->
+                            <time>${maven.build.timestamp}</time>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
