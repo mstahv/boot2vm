@@ -3,6 +3,7 @@ package boot2vm.it;
 import com.github.dockerjava.api.model.Bind;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 
 import java.nio.file.Path;
@@ -26,6 +27,9 @@ public class Vm extends GenericContainer<Vm> {
         withNetworkAliases(name);
         withPrivilegedMode(true);
         withTmpFs(Map.of("/run", "rw", "/run/lock", "rw"));
+        // For a browser in the test JVM; nothing listens here before the app is deployed
+        withExposedPorts(80);
+        waitingFor(Wait.forSuccessfulCommand("true"));
         withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
                 .withCgroupnsMode("host")
                 .withBinds(Bind.parse("/sys/fs/cgroup:/sys/fs/cgroup:rw")));

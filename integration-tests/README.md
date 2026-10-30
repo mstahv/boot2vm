@@ -21,6 +21,14 @@ Requirements: Docker that can run privileged containers, and Java 21+ with Maven
 
 The browser tests run Playwright in the test JVM, which downloads Chromium on the first run. Deploy serves the init form in the workstation container on port 8888 (`--gui`, with `SERVER_ADDRESS` and `SERVER_PORT` set), mapped to a free port on your machine.
 
+To watch what the browser tests do, record them, slowed down:
+
+```bash
+mvn verify -Dit.test=InitFormIT -Dit.video=target/videos -Dit.slowMo=400
+```
+
+Each page becomes a `.webm` in `target/videos` (plays in Chrome, Firefox and VLC).
+
 Each command run in a container is echoed to the test output, see `target/failsafe-reports/*.xml`.
 
 ## Scenarios
