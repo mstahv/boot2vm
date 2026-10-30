@@ -35,12 +35,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The Vaadin example with graceful blue-green deployments: set the server up with
- * the init form, then deploy a new version while two users are using the app. The
- * one in a view marked for automatic upgrades is moved right away, the other one
- * is told about the new version and moves when clicking "Update now".
+ * the init form, then deploy a new version while three users are using the app.
+ * The one in a view marked for automatic upgrades is moved right away, the one with
+ * unsaved changes in a form when they save, and the third one is told about the
+ * new version and moves when clicking "Update now".
  * <p>
  * The deploy is followed in the deploy window. A third deploy shows its "Move them
- * now" button, for a user who doesn't get around to updating.
+ * now" button, for a user who doesn't get around to updating. Last, screenshots of
+ * both ways the example can tell users about a new version.
  * <p>
  * With -Dit.video=dir every window is recorded, with a timeline.txt of when each
  * recording started and when things happened, for putting them together.
@@ -49,7 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GracefulDrainIT {
 
     /** The deploy window is narrower, to fit next to the users in the demo video. */
-    static final int DEPLOY_WIDTH = 880, DEPLOY_HEIGHT = 820;
+    static final int DEPLOY_WIDTH = 880, DEPLOY_HEIGHT = 550;
 
     static final Path VIDEO_DIR = System.getProperty("it.video") == null ? null : Path.of(System.getProperty("it.video"));
 
@@ -143,17 +145,25 @@ class GracefulDrainIT {
         var slot = pinned.page.getByText(Pattern.compile("^Current slot: "));
         assertThat(slot).isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(60_000));
         String oldSlot = slot.textContent();
-        // ...the other one in a view marked with @AutoUpgrade
+        // Tell the users with a notification, rather than the example's badge in the drawer
+        chooseNotifier(pinned.page, "Notification");
+        // ...another one in a view marked with @AutoUpgrade...
         var auto = new Window("4-user-info");
         auto.page.navigate("http://vm1/info");
         assertThat(auto.page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Info").setExact(true))).isVisible();
-        pause(auto.page);
+        // ...and one with unsaved changes in a form that decides itself (AutoUpgradeable)
+        var form = new Window("5-user-form");
+        form.page.navigate("http://vm1/form");
+        form.page.getByLabel("Notes").fill("Half-written notes");
+        form.page.getByLabel("Notes").press("Tab");
+        pause(form.page);
 
         workstation.sh(app, "sed -i 's/\"Graceful Blue-Green Demo\"/\"Graceful Blue-Green Demo, version 2\"/'"
                 + " src/main/java/org/example/ApplicationLayout.java");
         var window = new Window("2-deploy-window", DEPLOY_WIDTH, DEPLOY_HEIGHT);
         var deploy = workstation.deployWithGui(app);
         open(window.page, workstation.formUrl() + "deploy", deploy, "vaadin-progress-bar");
+        timeline("deploy window shown");
 
         assertThat(auto.page.getByText("You were automatically moved to a new version"))
                 .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(Duration.ofMinutes(15).toMillis()));
@@ -163,10 +173,21 @@ class GracefulDrainIT {
         assertThat(pinned.page.getByText("A new version is available").first()).isVisible();
         timeline("new version announced");
         assertThat(pinned.page.getByText("Graceful Blue-Green Demo, version 2")).not().isVisible();
-        // The deploy waits for the user who stays
-        assertThat(window.page.getByText("1 user is still on the old version")).isVisible();
-        // Let the user finish what they were doing, then update
-        pinned.page.waitForTimeout(VIDEO_DIR != null ? 8000 : 1000);
+        assertThat(form.page.getByText("Save your notes to continue with it")).isVisible();
+        // The deploy waits for the users who stay
+        assertThat(window.page.getByText(Pattern.compile("users? (is|are) still on the old version"))).isVisible();
+
+        // Saved, the form has nothing to lose: it moves on its own
+        form.page.waitForTimeout(VIDEO_DIR != null ? 5000 : 500);
+        form.page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Save")).click();
+        timeline("form saved");
+        assertThat(form.page.getByText("You were automatically moved to a new version")).isVisible();
+        assertThat(form.page.getByText("Graceful Blue-Green Demo, version 2")).isVisible();
+        assertThat(window.page.getByText("1 user is still on the old version"))
+                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(10_000));
+
+        // Let the last user finish what they were doing, then update
+        pinned.page.waitForTimeout(VIDEO_DIR != null ? 5000 : 500);
         pinned.page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Update now").setExact(true)).first().click();
         timeline("update clicked");
         assertThat(pinned.page.getByText("Welcome to the new version!")).isVisible();
@@ -184,6 +205,7 @@ class GracefulDrainIT {
         window.close();
         pinned.close();
         auto.close();
+        form.close();
 
         var result = deploy.get(1, TimeUnit.MINUTES);
         assertEquals(0, result.exitCode(), "deploy failed");
@@ -195,17 +217,19 @@ class GracefulDrainIT {
     @Order(3)
     void deployWindowFollowsTheDrainAndMovesTheUsersOnRequest() throws Exception {
         // A user who doesn't get around to updating
-        var user = new Window("6-user-moved");
+        var user = new Window("7-user-moved");
         user.page.navigate("http://vm1/");
         var slot = user.page.getByText(Pattern.compile("^Current slot: "));
         assertThat(slot).isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(60_000));
         String oldSlot = slot.textContent();
+        chooseNotifier(user.page, "Notification");
 
         workstation.sh(app, "sed -i 's/Demo, version 2/Demo, version 3/' src/main/java/org/example/ApplicationLayout.java");
-        var window = new Window("5-deploy-window", DEPLOY_WIDTH, DEPLOY_HEIGHT);
+        var window = new Window("6-deploy-window", DEPLOY_WIDTH, DEPLOY_HEIGHT);
         var deploy = workstation.deployWithGui(app);
         open(window.page, workstation.formUrl() + "deploy", deploy, "vaadin-progress-bar");
         assertThat(window.page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Deploying"))).isVisible();
+        timeline("move: deploy window shown");
 
         // The windows closed in the previous test may still count, until Vaadin misses their heartbeats
         assertThat(window.page.getByText(Pattern.compile("users? (is|are) still on the old version")))
@@ -235,6 +259,33 @@ class GracefulDrainIT {
         var result = deploy.get(1, TimeUnit.MINUTES);
         assertEquals(0, result.exitCode(), "deploy failed");
         assertTrue(result.output().contains("Operator requested force-cutover"), "the button must cut over");
+    }
+
+    @Test
+    @Order(4)
+    void bothNotifiersTellAboutANewVersion() {
+        // The example simulates a new version without a deployment; screenshots for the demo video
+        for (var notifier : List.of("Notification", "Badge in the drawer")) {
+            var context = browser.newContext(new Browser.NewContextOptions().setViewportSize(1280, 800));
+            var page = context.newPage();
+            page.navigate("http://vm1/");
+            chooseNotifier(page, notifier);
+            page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Simulate new version")).click();
+            assertThat(page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Update now").setExact(true)).first())
+                    .isVisible();
+            page.waitForTimeout(1000); // the notification's opening animation
+            if (VIDEO_DIR != null) {
+                page.screenshot(new Page.ScreenshotOptions().setPath(VIDEO_DIR.resolve(
+                        "notifier-" + (notifier.startsWith("Badge") ? "badge" : "notification") + ".png")));
+            }
+            context.close();
+        }
+    }
+
+    /** Pick how the example tells its users about new versions (app wide, until it restarts). */
+    static void chooseNotifier(Page page, String caption) {
+        page.locator("vaadin-select").click();
+        page.getByRole(AriaRole.OPTION, new Page.GetByRoleOptions().setName(caption).setExact(true)).click();
     }
 
     /** A browser window of its own (no shared cookies), recorded as name.webm with -Dit.video. */

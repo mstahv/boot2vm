@@ -711,8 +711,11 @@ public class Deploy {
 
             # Poll active-users endpoint until drained or timeout expires
             echo "--- Draining users from $ACTIVE_LABEL ($ACTIVE_SERVICE) (timeout: ${DRAIN_TIMEOUT}s) ---"
+            # Checked every 2 s, so the deploy moves on soon after the last user; the count is
+            # printed when it changes, and every 10 s
             ELAPSED=0
             COUNT="1"
+            SHOWN=""
             OPERATOR_CUTOVER=""
             while [ "$ELAPSED" -lt "$DRAIN_TIMEOUT" ]; do
                 RESPONSE=$(curl -s --max-time 5 "http://localhost:$ACTIVE_MGMT_PORT$ACTIVE_USERS_PATH" 2>/dev/null || echo "")
@@ -725,16 +728,22 @@ public class Deploy {
                     echo "All users drained after ${ELAPSED}s"
                     break
                 fi
-                REMAINING=$((DRAIN_TIMEOUT - ELAPSED))
-                echo "$COUNT users remaining (${ELAPSED}s elapsed, ${REMAINING}s until forced upgrade) — press D to force-upgrade now"
+                if [ "$COUNT" != "$SHOWN" ] || [ $((ELAPSED % 10)) -eq 0 ]; then
+                    REMAINING=$((DRAIN_TIMEOUT - ELAPSED))
+                    echo "$COUNT users remaining (${ELAPSED}s elapsed, ${REMAINING}s until forced upgrade) — press D to force-upgrade now"
+                    SHOWN="$COUNT"
+                fi
                 key=""
-                read -t 10 -r -s -n 1 key 2>/dev/null || true
+                READ_STATUS=0
+                read -t 2 -r -s -n 1 key 2>/dev/null || READ_STATUS=$?
+                # Without input to wait on (no terminal), read returns at once: wait anyway
+                if [ "$READ_STATUS" -ne 0 ] && [ "$READ_STATUS" -le 128 ]; then sleep 2; fi
                 if [ "${key}" = "d" ] || [ "${key}" = "D" ]; then
                     echo "Operator requested force-cutover — remaining users will be dropped to new slot"
                     OPERATOR_CUTOVER=1
                     break
                 fi
-                ELAPSED=$((ELAPSED + 10))
+                ELAPSED=$((ELAPSED + 2))
             done
 
             if [ "$COUNT" != "0" ] && [ -z "$OPERATOR_CUTOVER" ]; then

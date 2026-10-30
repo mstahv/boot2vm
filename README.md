@@ -278,7 +278,7 @@ When `BLUE_GREEN=yes`, you can additionally enable `BLUE_GREEN_GRACEFUL=yes` to 
 1. The new version is deployed to the inactive slot and health-checked as normal.
 2. Caddy is reconfigured to split traffic: users carrying a slot cookie (`X-Slot=blue`) continue to reach the old server; everyone else is routed to the new server.
 3. The old server is notified via `POST /actuator/new-version` with a `{"deadline":"<UTC timestamp>"}` body indicating when forced cutover will happen, so it can show a "New version available — upgrade by HH:mm UTC" banner.
-4. The deploy script polls `GET /actuator/active-users` on the old server every 10 s, waiting for `{"count": 0}`. Each poll prints the remaining time until forced cutover. Press **D** at any point (or *Move them now* in the deploy window) to skip the drain and force an immediate cutover.
+4. The deploy script polls `GET /actuator/active-users` on the old server every 2 s, waiting for `{"count": 0}`. It prints the number of users and the remaining time until forced cutover when the number changes, and every 10 s. Press **D** at any point (or *Move them now* in the deploy window) to skip the drain and force an immediate cutover.
 5. Once drained (or `DRAIN_TIMEOUT` seconds have elapsed, or **D** was pressed), Caddy is switched to the new backend only and the old service is stopped.
 
 ### API contract the app must implement
