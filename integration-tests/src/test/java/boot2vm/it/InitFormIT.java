@@ -108,6 +108,7 @@ class InitFormIT {
         field("Host").fill("vm1");
         field("App user").fill("hello");
         field("Environment variables").fill("GREETING=browser");
+        page.getByRole(AriaRole.CHECKBOX, new Page.GetByRoleOptions().setName("Install security updates automatically")).uncheck();
         pause();
         page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Initialize server")).click();
         assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Setting up vm1"))).isVisible();
@@ -116,8 +117,10 @@ class InitFormIT {
         var output = page.locator("pre");
         assertThat(output).containsText("Installing JDK", new LocatorAssertions.ContainsTextOptions().setTimeout(120_000));
         assertThat(page.locator("vaadin-progress-bar")).isVisible();
-        assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("@vm1 is ready")))
-                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(600_000));
+        var outcome = page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions()
+                .setName(Pattern.compile("is ready|Setup failed")));
+        assertThat(outcome).isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(600_000));
+        assertEquals("@vm1 is ready", outcome.textContent(), () -> page.locator("pre").textContent());
         assertThat(output).containsText("Deployed successfully to @vm1");
         pause();
 
@@ -132,6 +135,9 @@ class InitFormIT {
         // Left blank in the form: derived from the host
         assertTrue(conf.contains("DOMAIN=vm1\n"), conf);
         assertTrue(conf.contains("HTTPS=no\n"), conf);
+        assertTrue(conf.contains("AUTO_UPDATES=no\n"), conf);
+        assertTrue(vm.sh("apt-config dump").contains("APT::Periodic::Unattended-Upgrade \"0\";"),
+                "the image's automatic updates must be turned off");
     }
 
     @Test

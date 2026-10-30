@@ -62,6 +62,7 @@ class PlainAppIT {
                 .accept("JDK provider", "temurin")
                 .accept("Configure hardware access", "no")
                 .accept("Blue-green deployment", "no")
+                .accept("Automatic security updates", "yes")
                 .accept("Configure firewall with ufw", "yes")
                 .accept("Expose app server port(s) 8080", "no")
                 .answer("Environment variable", "GREETING=world")
@@ -78,6 +79,7 @@ class PlainAppIT {
         assertTrue(!conf.contains("GREETING"), "env vars must stay on the server: " + conf);
         assertEquals("active", vm.sh("systemctl is-active hello").trim());
         assertTrue(vm.sh("ufw status").contains("Status: active"));
+        assertTrue(vm.sh("apt-config dump").contains("APT::Periodic::Unattended-Upgrade \"1\";"), "automatic updates are on by default");
     }
 
     @Test

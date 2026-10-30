@@ -112,7 +112,7 @@ Configure hardware access / JVM options (yes/no) [no]:
 
 Only the host is required — sensible defaults are derived for the rest. HTTPS defaults to `no` when the domain is a LAN address a public CA cannot issue a certificate for, such as `raspberrypi.local`, a bare hostname or an IP; for those pick `internal` if you need HTTPS (see *Local HTTPS for a PWA* below). Multiple domains are supported (e.g., `myapp.example.com, www.myapp.example.com`) — enter them comma-separated and Caddy will serve all of them with automatic HTTPS. The server setup:
 
- 1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot when required
+ 1. Configures **unattended-upgrades** for automatic nightly security updates with automatic reboot at 02:00 when required (on by default; turning it off in `init` also switches off updates the image had enabled, `AUTO_UPDATES=no` in the config)
  2. Installs **JDK 25** (Eclipse Adoptium / Temurin by default; Azul Zulu, or IBM Semeru with the [OpenJ9](https://eclipse.dev/openj9/) VM instead of HotSpot — often a smaller memory footprint. Semeru is installed from its GitHub release tarball into `/opt/semeru-25` and has no 32-bit ARM build)
  3. Creates the app user with SSH authorized key copied from the admin user
  4. Creates the working directory `/home/$USER/app`

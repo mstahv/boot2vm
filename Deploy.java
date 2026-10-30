@@ -106,6 +106,7 @@ public class Deploy {
             PORT="${13:-8080}"             # app port; blue-green green slot uses PORT+1
             JVM_OPTS="${14:-}"             # extra JVM flags, exposed to the unit as JAVA_OPTS
             USER_GROUPS="${15:-}"          # comma-separated extra groups for the app user (gpio,i2c,...)
+            AUTO_UPDATES="${16:-yes}"      # unattended security updates with a nightly reboot when needed
 
             # Build Caddy site address (supports multiple domains)
             TLS_DIRECTIVE=""
@@ -154,17 +155,28 @@ public class Deploy {
             apt_install rsync
 
             # 1. Automatic security updates with nightly reboot if required
-            echo "--- Configuring unattended-upgrades ---"
-            apt_install unattended-upgrades
-            cat > /etc/apt/apt.conf.d/20auto-upgrades << 'CONF'
+            if [ "$AUTO_UPDATES" = "yes" ]; then
+                echo "--- Configuring unattended-upgrades ---"
+                apt_install unattended-upgrades
+                cat > /etc/apt/apt.conf.d/20auto-upgrades << 'CONF'
             APT::Periodic::Update-Package-Lists "1";
             APT::Periodic::Unattended-Upgrade "1";
             CONF
-            cat > /etc/apt/apt.conf.d/50unattended-upgrades-local << 'CONF'
+                cat > /etc/apt/apt.conf.d/50unattended-upgrades-local << 'CONF'
             Unattended-Upgrade::Automatic-Reboot "true";
             Unattended-Upgrade::Automatic-Reboot-Time "02:00";
             CONF
-            systemctl enable --now unattended-upgrades
+                systemctl enable --now unattended-upgrades
+            else
+                # Off, also when the image or an earlier init turned them on; the package
+                # lists are still refreshed daily, so installs stay quick
+                echo "--- Turning off unattended-upgrades ---"
+                cat > /etc/apt/apt.conf.d/20auto-upgrades << 'CONF'
+            APT::Periodic::Update-Package-Lists "1";
+            APT::Periodic::Unattended-Upgrade "0";
+            CONF
+                rm -f /etc/apt/apt.conf.d/50unattended-upgrades-local
+            fi
 
             # 2. Install JDK 25 (Eclipse Adoptium / Temurin, Azul Zulu or IBM Semeru / OpenJ9)
             JDK_PROVIDER="$(printf '%s' "$JDK_PROVIDER" | tr '[:upper:]' '[:lower:]')"
@@ -182,7 +194,7 @@ public class Deploy {
                     apt_install wget apt-transport-https gpg
                     wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
                         | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
-                    echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \\
+                    echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" \\
                         > /etc/apt/sources.list.d/adoptium.list
                     apt_install temurin-25-jdk
                     ;;
@@ -1120,7 +1132,8 @@ public class Deploy {
                 + " " + jdkProvider
                 + " " + port
                 + " " + shellQuote(jvmOpts)
-                + " " + shellQuote(userGroups));
+                + " " + shellQuote(userGroups)
+                + " " + (config.isAutoUpdates() ? "yes" : "no"));
 
         Files.delete(tempScript);
 
@@ -1209,6 +1222,8 @@ public class Deploy {
             }
         }
 
+        c.setAutoUpdates("yes".equalsIgnoreCase(prompt(console, "Automatic security updates, rebooting at 02:00 when needed (yes/no)",
+                c.isAutoUpdates() ? "yes" : "no")));
         c.setFirewall("yes".equalsIgnoreCase(prompt(console, "Configure firewall with ufw (yes/no)",
                 c.isFirewall() ? "yes" : "no")));
         if (c.isFirewall() && c.isWebService()) {
@@ -1259,7 +1274,7 @@ public class Deploy {
         private String jvmOpts, userGroups;
         private String slotCookie, drainTimeout, managementPort, notifyPath, activeUsersPath;
         private String env;
-        private boolean webService = true, blueGreen, gracefulDrain, firewall = true, exposeNodes;
+        private boolean webService = true, blueGreen, gracefulDrain, firewall = true, exposeNodes, autoUpdates = true;
 
         /**
          * Read a config file. Another target's host and domains, and the HTTPS
@@ -1292,6 +1307,7 @@ public class Deploy {
             c.blueGreen = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN", "no"));
             c.gracefulDrain = "yes".equalsIgnoreCase(props.getProperty("BLUE_GREEN_GRACEFUL", "no"));
             c.firewall = "yes".equalsIgnoreCase(props.getProperty("FIREWALL", "yes"));
+            c.autoUpdates = !"no".equalsIgnoreCase(props.getProperty("AUTO_UPDATES", "yes"));
             c.exposeNodes = "yes".equalsIgnoreCase(props.getProperty("EXPOSE_NODES", "no"));
             // Without graceful drain the port is written blank: suggest the usual one if it gets enabled
             if (!c.gracefulDrain && c.managementPort != null && c.managementPort.isBlank()) c.managementPort = null;
@@ -1453,6 +1469,7 @@ public class Deploy {
                     + "MANAGEMENT_PORT=" + managementPort + "\n"
                     + "NOTIFY_PATH=" + notifyPath + "\n"
                     + "ACTIVE_USERS_PATH=" + activeUsersPath + "\n"
+                    + "AUTO_UPDATES=" + (autoUpdates ? "yes" : "no") + "\n"
                     + "FIREWALL=" + (firewall ? "yes" : "no") + "\n"
                     + "EXPOSE_NODES=" + (exposeNodes ? "yes" : "no") + "\n"
                     + "WEB_SERVICE=" + (webService ? "yes" : "no") + "\n"
@@ -1502,6 +1519,8 @@ public class Deploy {
         public void setBlueGreen(boolean blueGreen) { this.blueGreen = blueGreen; }
         public boolean isGracefulDrain() { return gracefulDrain; }
         public void setGracefulDrain(boolean gracefulDrain) { this.gracefulDrain = gracefulDrain; }
+        public boolean isAutoUpdates() { return autoUpdates; }
+        public void setAutoUpdates(boolean autoUpdates) { this.autoUpdates = autoUpdates; }
         public boolean isFirewall() { return firewall; }
         public void setFirewall(boolean firewall) { this.firewall = firewall; }
         public boolean isExposeNodes() { return exposeNodes; }
@@ -1630,6 +1649,7 @@ public class Deploy {
         static final Map<String, Double> STEPS = Map.ofEntries(
                 Map.entry("Initializing server", 0.02),
                 Map.entry("--- Configuring unattended-upgrades", 0.06),
+                Map.entry("--- Turning off unattended-upgrades", 0.06),
                 Map.entry("--- Installing JDK", 0.1),
                 Map.entry("--- Creating user", 0.4),
                 Map.entry("--- Installing systemd", 0.45),
@@ -1794,18 +1814,18 @@ public class Deploy {
         final WebSection web = new WebSection();
         final HardwareSection hardware = new HardwareSection(this::config);
         final BlueGreenSection blueGreen = new BlueGreenSection();
-        final FirewallSection firewall = new FirewallSection();
+        final SecuritySection security = new SecuritySection();
         final EnvSection env = new EnvSection();
         final Div errors = new Div();
         final FormBinder<InitConfig> binder = new FormBinder<>(InitConfig.class,
-                server, app, web, hardware, blueGreen, firewall, env);
+                server, app, web, hardware, blueGreen, security, env);
         boolean submitted;
 
         public InitView() throws IOException {
             setMaxWidth("52rem");
             getStyle().setMargin("0 auto");
             add(new H2("Set up a server for " + Path.of("").toAbsolutePath().getFileName()));
-            add(target, server, app, web, hardware, blueGreen, firewall, env, errors, new Buttons());
+            add(target, server, app, web, hardware, blueGreen, security, env, errors, new Buttons());
 
             binder.setClassLevelViolationDisplay(errors);
             binder.addValueChangeListener(e -> refresh());
@@ -1860,7 +1880,7 @@ public class Deploy {
             web.update(c);
             hardware.update(c);
             blueGreen.update(c);
-            firewall.update(c);
+            security.update(c);
             if (submitted) binder.setRawConstraintViolations(c.validate());
         }
 
@@ -2187,13 +2207,15 @@ public class Deploy {
         }
     }
 
-    static class FirewallSection extends FormSection {
+    static class SecuritySection extends FormSection {
+        final Checkbox autoUpdates = new Checkbox("Install security updates automatically");
         final Checkbox firewall = new Checkbox("Configure the firewall with ufw");
         final Checkbox exposeNodes = new Checkbox();
 
-        FirewallSection() {
-            super("Firewall", null);
-            form.add(firewall, exposeNodes);
+        SecuritySection() {
+            super("Security", null);
+            autoUpdates.setHelperText("unattended-upgrades, rebooting at 02:00 when an update needs it");
+            form.add(autoUpdates, firewall, exposeNodes);
         }
 
         @Override
