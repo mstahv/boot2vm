@@ -90,7 +90,7 @@ Interactive one-time setup. Opens a form in your browser for the connection deta
 
 The form shows all settings at once, hides the ones that don't apply (no domains for a headless service, no drain settings without blue-green, ...), and checks the values before anything is written. The hardware presets are checkboxes that stay in sync with the JVM options and groups below them. Inherited values are visible right away and can be cleared with a click. Closing the window (or the *Cancel* button) cancels init without writing anything.
 
-Add `--tui` (or set `BOOT2VM_TUI=1`) to answer the same questions in the terminal instead. The terminal UI is also used automatically over SSH and on Linux without a graphical display:
+The form is served on localhost only. Add `--tui` (or set `BOOT2VM_TUI=1`) to answer the same questions in the terminal instead. The terminal UI is also used automatically over SSH and on Linux without a graphical display; `--gui` serves the form anyway, for example to open it through an SSH port forward:
 
 ```
 Name for this server target (used as @name; blank keeps plain vmhosting.conf) [default]: cloud

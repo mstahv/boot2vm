@@ -740,11 +740,12 @@ public class Deploy {
         var selected = new ArrayList<String>();
         var rest = new ArrayList<String>();
         String from = null;
-        boolean tui = "1".equals(System.getenv("BOOT2VM_TUI")) || "true".equalsIgnoreCase(System.getenv("BOOT2VM_TUI"));
+        // How init asks: "tui", "gui", or null to pick the form when a browser can be opened
+        String ui = "1".equals(System.getenv("BOOT2VM_TUI")) || "true".equalsIgnoreCase(System.getenv("BOOT2VM_TUI")) ? "tui" : null;
         for (int i = 0; i < rawArgs.length; i++) {
             String arg = rawArgs[i];
-            if ("--tui".equals(arg)) {
-                tui = true;
+            if ("--tui".equals(arg) || "--gui".equals(arg)) {
+                ui = arg.substring(2);
             } else if ("--from".equals(arg)) {
                 if (i + 1 >= rawArgs.length) throw new IllegalArgumentException("--from needs a target name");
                 from = rawArgs[++i].replaceFirst("^@", "");
@@ -759,7 +760,7 @@ public class Deploy {
 
         try {
             switch (command) {
-                case "init" -> init(selected, from, tui);
+                case "init" -> init(selected, from, ui);
                 case "deploy" -> deployTargets(resolveTargets(selected, true));
                 case "logs" -> { loadConfig(singleTarget(selected, "logs")); logs(args); }
                 case "env" -> env(args, selected);
@@ -892,7 +893,8 @@ public class Deploy {
         System.out.println();
         System.out.println("Commands:");
         System.out.println("  init           - Set up the server (run once); 'init @name [--from @other]' adds another server");
-        System.out.println("                   Opens a form in the browser; --tui (or BOOT2VM_TUI=1) asks in the terminal");
+        System.out.println("                   Opens a form in the browser; --tui (or BOOT2VM_TUI=1) asks in the terminal,");
+        System.out.println("                   --gui serves the form even when no browser can be opened here");
         System.out.println("  deploy         - Build once, then sync and restart on every target (or the given @targets)");
         System.out.println("  targets        - List the configured servers");
         System.out.println("  logs [n] [slot] - Tail the application logs (default: 200 lines)");
@@ -1035,7 +1037,7 @@ public class Deploy {
     // -----------------------------------------------------------------------
     // init – interactively collect config, write vmhosting.conf, set up server
     // -----------------------------------------------------------------------
-    static void init(List<String> selected, String from, boolean tui) throws Exception {
+    static void init(List<String> selected, String from, String ui) throws Exception {
         if (selected.size() > 1) {
             throw new CommandFailed("init sets up one target at a time", 1);
         }
@@ -1051,8 +1053,8 @@ public class Deploy {
         boolean askName = selected.isEmpty() && allTargets().isEmpty();
 
         InitResult result;
-        String noGui = tui ? null : guiUnavailableReason();
-        if (tui || noGui != null) {
+        String noGui = ui == null ? guiUnavailableReason() : null;
+        if ("tui".equals(ui) || noGui != null) {
             if (noGui != null) System.out.println(noGui + ", using the terminal UI.");
             result = promptInit(targetName, askName, from);
         } else {
@@ -1536,7 +1538,8 @@ public class Deploy {
             InitGui.from = from;
             System.out.println("Opening the init form in your browser (add --tui to answer in the terminal instead) ...");
             var context = new SpringApplicationBuilder(InitGui.class).logStartupInfo(false)
-                    .properties("vaadin.heartbeatInterval=" + HEARTBEAT).run();
+                    // Only this machine may see the form; SERVER_ADDRESS and SERVER_PORT override for tests
+                    .properties("server.address=127.0.0.1", "vaadin.heartbeatInterval=" + HEARTBEAT).run();
             // The browser doesn't say when its window closes, but its heartbeats stop
             var watchdog = Executors.newSingleThreadScheduledExecutor();
             watchdog.scheduleWithFixedDelay(() -> {

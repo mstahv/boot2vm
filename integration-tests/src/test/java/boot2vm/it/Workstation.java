@@ -3,12 +3,14 @@ package boot2vm.it;
 import com.github.dockerjava.api.model.Bind;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.images.builder.Transferable;
 import org.testcontainers.utility.MountableFile;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Predicate;
 
 /**
@@ -22,6 +24,9 @@ public class Workstation extends GenericContainer<Workstation> {
     /** The boot2vm checkout, i.e. where Deploy.java is. */
     static final Path ROOT = Path.of(System.getProperty("boot2vm.root", "..")).toAbsolutePath().normalize();
 
+    /** The port the init form is served on, see {@link #withInitForm()}. */
+    static final int FORM_PORT = 8888;
+
     public record Result(int exitCode, String output) {
     }
 
@@ -33,6 +38,30 @@ public class Workstation extends GenericContainer<Workstation> {
         withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withBinds(
                 Bind.parse("boot2vm-it-m2:/root/.m2"),
                 Bind.parse("boot2vm-it-jbang:/root/.jbang/cache")));
+    }
+
+    /** Expose the init form port to the test JVM, for a browser to open it. */
+    Workstation withInitForm() {
+        withExposedPorts(FORM_PORT);
+        // Nothing listens on the port until a test starts init
+        waitingFor(Wait.forSuccessfulCommand("true"));
+        return this;
+    }
+
+    /** Where the browser reaches the init form, once {@link #initWithForm} runs. */
+    String formUrl() {
+        return "http://" + getHost() + ":" + getMappedPort(FORM_PORT) + "/";
+    }
+
+    /**
+     * Start init with the browser form in the background. The form listens on all
+     * interfaces of the container, on {@link #FORM_PORT}. The result completes
+     * when Deploy exits.
+     */
+    CompletableFuture<Result> initWithForm(String dir, String... args) {
+        return CompletableFuture.supplyAsync(() -> sh(dir,
+                "SERVER_ADDRESS=0.0.0.0 SERVER_PORT=" + FORM_PORT + " jbang /work/Deploy.java init --gui "
+                        + String.join(" ", args)));
     }
 
     /** Copy a project from apps/ to /work/{name} and return that directory. */

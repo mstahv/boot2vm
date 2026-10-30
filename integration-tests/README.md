@@ -19,6 +19,8 @@ mvn verify -Dit.test=PlainAppIT    # one class
 
 Requirements: Docker that can run privileged containers, and Java 21+ with Maven. The first run builds the images and fills the Maven and JBang caches (Docker volumes `boot2vm-it-m2` and `boot2vm-it-jbang`). After that, `PlainAppIT` takes about 1.5 minutes, most of it in apt on the server.
 
+The browser tests run Playwright in the test JVM, which downloads Chromium on the first run. Deploy serves the init form in the workstation container on port 8888 (`--gui`, with `SERVER_ADDRESS` and `SERVER_PORT` set), mapped to a free port on your machine.
+
 Each command run in a container is echoed to the test output, see `target/failsafe-reports/*.xml`.
 
 ## Scenarios
@@ -26,6 +28,7 @@ Each command run in a container is echoed to the test output, see `target/failsa
 Done:
 
 - `PlainAppIT`: init a fresh server with the terminal UI (checking the suggested defaults), serve a plain jar through Caddy with an env var from init, redeploy a changed version.
+- `InitFormIT`: the same with the init form, filled in with Playwright; then a new target that inherits Raspberry Pi settings from the first: the presets show them, unticking and *Clear* remove them, and *Cancel* writes nothing.
 
 TODO:
 
@@ -37,7 +40,6 @@ TODO:
 - Graceful drain, including the end user's experience verified with Playwright
 - `HTTPS=internal` and `root-cert`: curl with `--cacert`
 - Zulu and Semeru, and a non-root admin user with sudo
-- The init form in the browser, with Playwright
 - A "warm" vm image with the JDK and Caddy preinstalled, for faster scenarios
 - Running the suite in GitHub Actions (PR: the quick scenarios, nightly: the rest)
 
