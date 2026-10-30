@@ -63,6 +63,17 @@ public class OrderView extends VerticalLayout implements AutoUpgradeable {
 
 For views with neither, an app-wide rule can be set with `GracefulDrain.get().setAutoUpgradePolicy(ui -> ...)`.
 
+## Testing your upgrade rules
+
+`GracefulDrain.get().simulateNewVersion(ui, deadline)` makes one UI behave as if a new version was deployed, without affecting other UIs or the process state. Use it in browserless tests to check that users with unsaved work stay on the old version:
+
+```java
+navigate(OrderView.class);
+test(find(TextField.class).single()).setValue("unsaved");
+GracefulDrain.get().simulateNewVersion(UI.getCurrent(), Instant.now().plusSeconds(300));
+assertTrue(GracefulDrain.get().isPinned(UI.getCurrent()));
+```
+
 ## Customizing how users are told
 
 There are two levels, the more specific wins:

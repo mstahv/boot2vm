@@ -8,5 +8,6 @@ The heavy lifting is done by the [graceful-drain](../graceful-drain) library, wh
 - `InfoView` is annotated with `@AutoUpgrade`: users there are moved to the new version without asking.
 - `FormView` implements `AutoUpgradeable`: users are moved automatically only when they have no unsaved changes.
 - `MainView` shows the slot and pinned UI counts, and lets you release/pin the UI for testing.
+- `UpgradeRulesTest` checks these rules with browserless tests, simulating a new version with `GracefulDrain.simulateNewVersion`.
 
 The management endpoints are exposed in `application.properties`. Deploy with `BLUE_GREEN=yes`, `BLUE_GREEN_GRACEFUL=yes` and a separate `MANAGEMENT_PORT` in `vmhosting.conf`, so the endpoints are not reachable through the public proxy.

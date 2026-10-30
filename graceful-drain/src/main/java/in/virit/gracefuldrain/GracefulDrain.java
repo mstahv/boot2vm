@@ -54,6 +54,7 @@ public final class GracefulDrain {
 
     private static class UiState {
         boolean pinned;
+        Announcement simulated;
         Announcement handled;
         boolean notifierCalled;
         final Set<NewVersionObserver> notifiedObservers = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -164,6 +165,24 @@ public final class GracefulDrain {
     }
 
     /**
+     * Makes the given UI behave as if a new version was deployed, without affecting other UIs. For
+     * testing your upgrade rules, e.g. in a browserless test, or for trying out notifications during
+     * development. Unlike {@link #newVersionAvailable(Instant)}, the UI is handled right away. Without
+     * the boot2vm reverse proxy an upgrade just reloads the page on this server. Must be called from
+     * the UI thread.
+     *
+     * @param deadline when the user would be moved forcibly, null if not known
+     */
+    public void simulateNewVersion(UI ui, Instant deadline) {
+        UiState state = uis.get(ui);
+        if (state == null) {
+            return;
+        }
+        state.simulated = new Announcement(deadline);
+        handleNewVersion(ui);
+    }
+
+    /**
      * Keeps the user on this slot until they upgrade, the UI is closed or the deadline passes.
      * Must be called from the UI thread.
      */
@@ -177,7 +196,7 @@ public final class GracefulDrain {
         BrowserCookie.setCookie(slotCookie, slot);
         // Overridden if the user is upgraded in a controlled manner
         BrowserCookie.setCookie(MIGRATION_COOKIE, MigrationType.FORCED + ":" + slot);
-        if (announcement != null) {
+        if (announcementFor(ui) != null) {
             handleNewVersion(ui);
         }
     }
@@ -192,7 +211,7 @@ public final class GracefulDrain {
             return;
         }
         state.pinned = false;
-        if (announcement != null) {
+        if (announcementFor(ui) != null) {
             upgrade(ui, MigrationType.AUTO);
         }
     }
@@ -218,7 +237,7 @@ public final class GracefulDrain {
      * available. Must be called from the UI thread.
      */
     public void upgradeIfAllowed(UI ui) {
-        if (announcement != null && uis.containsKey(ui)) {
+        if (announcementFor(ui) != null) {
             handleNewVersion(ui);
         }
     }
@@ -252,7 +271,7 @@ public final class GracefulDrain {
         }
         // Also handles UIs arriving at this slot after the announcement
         ui.addAfterNavigationListener(e -> {
-            if (announcement != null && uis.containsKey(ui)) {
+            if (announcementFor(ui) != null) {
                 handleNewVersion(ui);
             }
         });
@@ -271,9 +290,17 @@ public final class GracefulDrain {
         }
     }
 
+    private Announcement announcementFor(UI ui) {
+        UiState state = uis.get(ui);
+        if (state == null) {
+            return null;
+        }
+        return announcement != null ? announcement : state.simulated;
+    }
+
     private void handleNewVersion(UI ui) {
         UiState state = uis.get(ui);
-        Announcement a = announcement;
+        Announcement a = announcementFor(ui);
         if (state == null || a == null) {
             return;
         }

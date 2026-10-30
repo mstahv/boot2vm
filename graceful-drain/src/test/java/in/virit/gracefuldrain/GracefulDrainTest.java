@@ -165,6 +165,19 @@ class GracefulDrainTest extends BrowserlessTest {
     }
 
     @Test
+    void simulatedNewVersionAffectsOnlyTheGivenUi() {
+        drain.setNotifier(notifier);
+        FormView form = navigate(FormView.class);
+        drain.simulateNewVersion(UI.getCurrent(), Instant.now().plusSeconds(60));
+        assertEquals(1, notifier.events.size());
+        assertFalse(drain.isNewVersionAvailable());
+
+        form.saved = true;
+        drain.upgradeIfAllowed(UI.getCurrent());
+        assertEquals(0, drain.getPinnedUiCount());
+    }
+
+    @Test
     void upgradeNow() {
         navigate(PlainView.class);
         announce();
