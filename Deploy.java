@@ -3031,11 +3031,17 @@ public class Deploy {
         if (!"root".equals(adminUser)) {
             command = "sudo " + command;
         }
-        int exit = new ProcessBuilder("ssh", "-t", "-i", sshKey, "-o", "StrictHostKeyChecking=accept-new",
-                adminUser + "@" + host, command)
-                .inheritIO()
-                .start()
-                .waitFor();
+        var builder = new ProcessBuilder("ssh", "-t", "-i", sshKey, "-o", "StrictHostKeyChecking=accept-new",
+                adminUser + "@" + host, command);
+        if (captureOutput) {
+            // Keyboard input still reaches the remote side, the output is copied to the init form
+            builder.redirectInput(ProcessBuilder.Redirect.INHERIT).redirectErrorStream(true);
+        } else {
+            builder.inheritIO();
+        }
+        var process = builder.start();
+        if (captureOutput) process.getInputStream().transferTo(System.out);
+        int exit = process.waitFor();
         if (exit != 0) {
             throw new CommandFailed("Remote command failed (exit " + exit + ")", exit);
         }
