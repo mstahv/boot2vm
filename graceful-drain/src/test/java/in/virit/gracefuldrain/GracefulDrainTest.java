@@ -3,6 +3,8 @@ package in.virit.gracefuldrain;
 import com.vaadin.browserless.BrowserlessTest;
 import com.vaadin.browserless.ViewPackages;
 import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.button.Button;
+import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.router.Route;
 import com.vaadin.flow.server.VaadinSession;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -22,6 +25,10 @@ class GracefulDrainTest extends BrowserlessTest {
 
     @Route("plain")
     public static class PlainView extends Div {
+    }
+
+    @Route("other")
+    public static class OtherView extends Div {
     }
 
     @Route("auto")
@@ -175,6 +182,39 @@ class GracefulDrainTest extends BrowserlessTest {
         form.saved = true;
         drain.upgradeIfAllowed(UI.getCurrent());
         assertEquals(0, drain.getPinnedUiCount());
+    }
+
+    @Test
+    void toastNotifierUpdateNowButton() {
+        drain.setNotifier(new ToastNotifier());
+        navigate(PlainView.class);
+        drain.simulateNewVersion(UI.getCurrent(), Instant.now().plusSeconds(60));
+        test(find(Button.class).withText("Update now").single()).click();
+        assertEquals(0, drain.getPinnedUiCount());
+    }
+
+    @Test
+    void closedToastLeavesReminder() {
+        drain.setNotifier(new ToastNotifier());
+        navigate(PlainView.class);
+        drain.simulateNewVersion(UI.getCurrent(), Instant.now().plusSeconds(60));
+        test(find(Button.class).withPropertyValue(Button::getAriaLabel, Optional.of("Close")).single()).click();
+        assertTrue(find(Button.class).withText("Update now").all().isEmpty());
+
+        // stays when navigating
+        navigate(OtherView.class);
+        test(find(ToastNotifier.Reminder.class).single()).click();
+        assertTrue(find(ToastNotifier.Reminder.class).all().isEmpty());
+        find(Button.class).withText("Update now").single();
+    }
+
+    @Test
+    void drawerBadgeNotifierFallsBackToToastWithoutAppLayout() {
+        drain.setNotifier(new DrawerBadgeNotifier());
+        navigate(PlainView.class);
+        drain.simulateNewVersion(UI.getCurrent(), Instant.now().plusSeconds(60));
+        assertEquals(1, find(Notification.class).all().size());
+        find(Button.class).withText("Update now").single();
     }
 
     @Test

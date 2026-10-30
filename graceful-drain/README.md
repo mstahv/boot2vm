@@ -79,7 +79,22 @@ assertTrue(GracefulDrain.get().isPinned(UI.getCurrent()));
 There are two levels, the more specific wins:
 
 1. **Per view or layout:** implement `NewVersionObserver` in a route target or router layout, e.g. to show a badge in the drawer. If any component in the active route chain implements it, the app-wide notifier is not used for the new-version announcement.
-2. **App wide:** provide an `UpgradeNotifier`, as a Spring bean or with `GracefulDrain.get().setNotifier(...)`. It also greets users arriving at the new version (`arrived(UI, MigrationType)`). The default `ToastNotifier` shows a notification with a countdown. Extend it to change texts or position.
+2. **App wide:** provide an `UpgradeNotifier`, as a Spring bean or with `GracefulDrain.get().setNotifier(...)`. It also greets users arriving at the new version (`arrived(UI, MigrationType)`).
+
+The library has two notifiers. Extend them, or `AbstractUpgradeNotifier` for your own, to change texts or the position:
+
+| `ToastNotifier` (default) | `DrawerBadgeNotifier` |
+|---|---|
+| ![Notification with a countdown and an Update now button](docs/screenshots/notification.png) | ![Badge at the end of the drawer](docs/screenshots/drawer-badge.png) |
+| A notification that stays until the user updates or closes it. Closing leaves a small reminder with the countdown in the corner, which opens the notification again: ![Reminder button](docs/screenshots/notification-reminder.png) Works in any layout. | A badge at the end of the `AppLayout` drawer, plus a short notification. Falls back to `ToastNotifier` without an AppLayout or when the drawer is closed, e.g. on mobile. |
+
+Users arriving at the new version are greeted, here after being moved automatically:
+
+![Greeting on the new version](docs/screenshots/arrived.png)
+
+A `NewVersionObserver` view can tell about the new version where it matters, e.g. next to a form with unsaved changes:
+
+![Notice above a form with unsaved changes](docs/screenshots/view-specific.png)
 
 The `Countdown` component shows the remaining time and ticks in the browser.
 

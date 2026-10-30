@@ -68,6 +68,6 @@ class UpgradeRulesTest extends SpringBrowserlessTest {
         navigate(MainView.class);
         simulateNewVersion();
         assertTrue(stillOnOldVersion());
-        find(ApplicationLayout.NewVersionBadge.class).single();
+        find(Button.class).withText("Update now").single();
     }
 }

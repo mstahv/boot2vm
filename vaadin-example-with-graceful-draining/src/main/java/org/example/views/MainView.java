@@ -7,12 +7,20 @@ import com.vaadin.flow.component.html.Emphasis;
 import com.vaadin.flow.component.html.H1;
 import com.vaadin.flow.component.html.H3;
 import com.vaadin.flow.component.html.Paragraph;
+import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
+import com.vaadin.flow.component.select.Select;
 import com.vaadin.flow.router.Route;
 import in.virit.color.NamedColor;
+import in.virit.gracefuldrain.DrawerBadgeNotifier;
 import in.virit.gracefuldrain.GracefulDrain;
+import in.virit.gracefuldrain.ToastNotifier;
+import in.virit.gracefuldrain.UpgradeNotifier;
 import org.vaadin.firitin.appframework.MenuItem;
 import org.vaadin.firitin.util.style.LumoProps;
+
+import java.time.Instant;
+import java.util.function.Supplier;
 
 @Route
 @MenuItem(title = "Main (pinned)", order = MenuItem.BEGINNING)
@@ -42,6 +50,11 @@ public class MainView extends VerticalLayout {
         add(new Emphasis("All views keep users on the version they started with, until they choose to update or the deploy deadline passes. The Info view is marked with @AutoUpgrade, and the Form view upgrades automatically when it has no unsaved changes."));
 
         add(new PinToggle());
+
+        add(new H3("Try it without a deployment"));
+        add(new HorizontalLayout(new NotifierSelect(), new SimulateButton()) {{
+            setAlignItems(Alignment.BASELINE);
+        }});
 
         add(appStats);
         appStats.update();
@@ -74,6 +87,43 @@ public class MainView extends VerticalLayout {
 
         private void updateText() {
             setText(gracefulDrain.isPinned(UI.getCurrent()) ? "Release me from this slot" : "Pin me to this slot");
+        }
+    }
+
+    enum NotifierStyle {
+        DRAWER("Badge in the drawer", DrawerBadgeNotifier::new),
+        TOAST("Notification", ToastNotifier::new);
+
+        final String caption;
+        final Supplier<UpgradeNotifier> factory;
+
+        NotifierStyle(String caption, Supplier<UpgradeNotifier> factory) {
+            this.caption = caption;
+            this.factory = factory;
+        }
+    }
+
+    /**
+     * Switches the notifier app wide, for demo purposes.
+     */
+    class NotifierSelect extends Select<NotifierStyle> {
+        NotifierSelect() {
+            setLabel("How users are told (for all users)");
+            setWidth("18em");
+            setItems(NotifierStyle.values());
+            setItemLabelGenerator(style -> style.caption);
+            setValue(gracefulDrain.getNotifier() instanceof DrawerBadgeNotifier ? NotifierStyle.DRAWER : NotifierStyle.TOAST);
+            addValueChangeListener(e -> gracefulDrain.setNotifier(e.getValue().factory.get()));
+        }
+    }
+
+    /**
+     * Shows what this user would see if a new version was deployed now. Without the boot2vm proxy,
+     * "Update now" just reloads the page.
+     */
+    class SimulateButton extends Button {
+        SimulateButton() {
+            super("Simulate new version", e -> gracefulDrain.simulateNewVersion(UI.getCurrent(), Instant.now().plusSeconds(300)));
         }
     }
 
