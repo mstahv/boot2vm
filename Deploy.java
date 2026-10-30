@@ -5,12 +5,15 @@
 
 package boot2vm;
 
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.HasValidation;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
 import com.vaadin.flow.component.checkbox.Checkbox;
 import com.vaadin.flow.component.checkbox.CheckboxGroup;
 import com.vaadin.flow.component.combobox.ComboBox;
+import com.vaadin.flow.component.details.Details;
 import com.vaadin.flow.component.formlayout.FormLayout;
 import com.vaadin.flow.component.html.Anchor;
 import com.vaadin.flow.component.html.Div;
@@ -26,6 +29,7 @@ import com.vaadin.flow.component.progressbar.ProgressBar;
 import com.vaadin.flow.component.select.Select;
 import com.vaadin.flow.component.textfield.TextArea;
 import com.vaadin.flow.component.textfield.TextField;
+import com.vaadin.flow.data.value.ValueChangeMode;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.PageTitle;
@@ -1997,23 +2001,25 @@ public class Deploy {
     @PageTitle("boot2vm init")
     public static class InitView extends VerticalLayout implements BeforeEnterObserver {
         final TargetSection target = new TargetSection();
-        final ServerSection server = new ServerSection();
+        final ServerSection server = new ServerSection(target);
         final AppSection app = new AppSection();
         final WebSection web = new WebSection();
-        final HardwareSection hardware = new HardwareSection(this::config);
         final BlueGreenSection blueGreen = new BlueGreenSection();
         final SecuritySection security = new SecuritySection();
-        final EnvSection env = new EnvSection();
+        final HardwareSection hardware = new HardwareSection(this::config);
+        final List<FormSection> optional = List.of(web, blueGreen, security, hardware);
         final Div errors = new Div();
+        final Buttons buttons = new Buttons();
         final FormBinder<InitConfig> binder = new FormBinder<>(InitConfig.class,
-                server, app, web, hardware, blueGreen, security, env);
+                server, app, web, hardware, blueGreen, security);
         boolean submitted;
 
         public InitView() throws IOException {
             setMaxWidth("52rem");
             getStyle().setMargin("0 auto");
             add(new H2("Set up a server for " + Path.of("").toAbsolutePath().getFileName()));
-            add(target, server, app, web, hardware, blueGreen, security, env, errors, new Buttons());
+            add(server, app, new Paragraph("The rest has defaults that suit most apps, open a part to change it."));
+            add(web, blueGreen, security, hardware, errors, buttons);
 
             binder.setClassLevelViolationDisplay(errors);
             binder.addValueChangeListener(e -> refresh());
@@ -2023,7 +2029,10 @@ public class Deploy {
             target.defaultsFrom.addValueChangeListener(e -> {
                 if (e.isFromClient()) loadDefaults(e.getValue());
             });
-            target.name.addValueChangeListener(e -> target.validateName());
+            target.name.addValueChangeListener(e -> {
+                target.validateName();
+                refresh();
+            });
 
             Target initial = Target.named(Gui.initialTarget);
             Path source = defaultsSource(initial, Gui.from);
@@ -2044,6 +2053,8 @@ public class Deploy {
             server.addKeyOption(config.getSshKey());
             binder.setValue(config);
             hardware.configChanged();
+            // Settings taken from another server must not go unnoticed
+            if (!config.getJvmOpts().isBlank() || !config.getUserGroups().isBlank()) hardware.open();
             refresh();
         }
 
@@ -2075,6 +2086,7 @@ public class Deploy {
             blueGreen.update(c);
             security.update(c);
             if (submitted) binder.setRawConstraintViolations(c.validate());
+            buttons.initialize.setEnabled(c.getHost() != null && !c.getHost().isBlank() && target.hasName());
         }
 
         void submit() {
@@ -2087,6 +2099,7 @@ public class Deploy {
             var problems = c.validate();
             binder.setRawConstraintViolations(problems);
             if (!problems.isEmpty() || !target.validateName()) {
+                optional.forEach(FormSection::openIfInvalid);
                 Notification.show("Check the highlighted fields");
                 return;
             }
@@ -2097,9 +2110,11 @@ public class Deploy {
         }
 
         class Buttons extends HorizontalLayout {
+            final Button initialize = new Button("Initialize server", e -> submit());
+
             Buttons() {
-                var initialize = new Button("Initialize server", e -> submit());
                 initialize.addThemeVariants(ButtonVariant.PRIMARY);
+                initialize.setTooltipText("Fill in the required fields first");
                 add(initialize, new Button("Cancel", e -> {
                     Gui.result.cancel(false);
                     InitView.this.removeAll();
@@ -2109,19 +2124,60 @@ public class Deploy {
         }
     }
 
-    /** A titled part of the init form. Subclasses declare fields named after InitConfig properties. */
+    /**
+     * A titled part of the init form. Subclasses declare fields named after InitConfig properties.
+     * An optional part is collapsed, with a summary of its values next to the title.
+     */
     static class FormSection extends VerticalLayout {
         final FormLayout form = new FormLayout();
+        final VerticalLayout content = new VerticalLayout();
+        final Span summary = new Span();
+        Details details;
 
         FormSection(String title, String description) {
+            this(title, description, false);
+        }
+
+        FormSection(String title, String description, boolean optional) {
             setPadding(false);
-            add(new H3(title));
-            if (description != null) add(new Paragraph(description));
-            add(form);
+            content.setPadding(false);
+            if (description != null) content.add(new Paragraph(description));
+            content.add(form);
+            if (optional) {
+                details = new Details(new SectionTitle(title, summary), content);
+                details.setWidthFull();
+                add(details);
+            } else {
+                if (title != null) add(new H3(title));
+                add(content);
+            }
         }
 
         /** Show the parts that apply to the current values. */
         void update(InitConfig config) {
+        }
+
+        void open() {
+            if (details != null) details.setOpened(true);
+        }
+
+        /** Open the part when a field in it shows an error. */
+        void openIfInvalid() {
+            if (invalid(form)) open();
+        }
+
+        static boolean invalid(Component component) {
+            if (component instanceof HasValidation field && field.isInvalid()) return true;
+            return component.getChildren().anyMatch(FormSection::invalid);
+        }
+
+        static class SectionTitle extends Div {
+            SectionTitle(String title, Span summary) {
+                add(new Span(title) {{
+                    getStyle().setFontWeight(Style.FontWeight.BOLD).setFontSize("1.15em").setMarginRight("0.75em");
+                }}, summary);
+                summary.getStyle().setColor("var(--vaadin-text-color-secondary, #666)").setFontSize("0.9em");
+            }
         }
     }
 
@@ -2131,8 +2187,10 @@ public class Deploy {
         Target fixed;
 
         TargetSection() {
-            super("Target", null);
+            super(null, null);
             name.setHelperText("Used as @name in later commands; 'default' writes plain vmhosting.conf");
+            name.setRequiredIndicatorVisible(true);
+            name.setValueChangeMode(ValueChangeMode.EAGER);
             defaultsFrom.setLabel("Start from the settings of");
             defaultsFrom.setEmptySelectionAllowed(true);
             defaultsFrom.setEmptySelectionCaption("Built-in defaults");
@@ -2161,6 +2219,10 @@ public class Deploy {
             return fixed != null ? fixed : Target.named(name.getValue().trim());
         }
 
+        boolean hasName() {
+            return fixed != null || !name.getValue().isBlank();
+        }
+
         boolean validateName() {
             boolean valid = fixed != null || isValidTargetName(name.getValue().trim());
             name.setInvalid(!valid);
@@ -2175,9 +2237,13 @@ public class Deploy {
         final ComboBox<String> sshKey = new ComboBox<>("SSH public key");
         final List<String> keys = new ArrayList<>();
 
-        ServerSection() throws IOException {
-            super("Server", "How to reach the server over SSH.");
+        ServerSection(TargetSection target) throws IOException {
+            super("Server", "How to reach the server over SSH, and the name it goes by here.");
+            content.addComponentAtIndex(content.indexOf(form), target);
             host.setHelperText("SSH address: a single hostname or IP; more domains can be given below");
+            host.setRequiredIndicatorVisible(true);
+            // Every key counts: Initialize is enabled once the host is there
+            host.setValueChangeMode(ValueChangeMode.EAGER);
             adminUser.setHelperText("root, or a user with sudo");
             keys.addAll(listSshKeys());
             sshKey.setItems(keys);
@@ -2241,7 +2307,7 @@ public class Deploy {
         final TextField port = new TextField("App port");
 
         WebSection() {
-            super("Web", null);
+            super("Web", null, true);
             webService.setTooltipText("Uncheck for headless services: no reverse proxy, no 80/443 firewall rules");
             domain.setHelperText("Comma-separated; Caddy serves them all");
             https.setLabel("HTTPS");
@@ -2268,8 +2334,20 @@ public class Deploy {
             proxy.setVisible(web);
             port.setVisible(web);
             domain.setPlaceholder(config.getHost());
-            https.setEmptySelectionCaption("Automatic: " + ("yes".equals(config.derivedHttps())
-                    ? "public certificate" : "plain HTTP for a LAN address"));
+            String automatic = "yes".equals(config.derivedHttps()) ? "public certificate" : "plain HTTP for a LAN address";
+            https.setEmptySelectionCaption("Automatic: " + automatic);
+            if (!web) {
+                summary.setText("Not a web service: no reverse proxy");
+                return;
+            }
+            String domains = config.getDomain() != null && !config.getDomain().isBlank() ? config.getDomain() : config.getHost();
+            String httpsMode = config.getHttps() == null || config.getHttps().isBlank() ? automatic : switch (config.getHttps()) {
+                case "yes" -> "public certificate";
+                case "no" -> "plain HTTP";
+                default -> "internal CA";
+            };
+            summary.setText((domains == null || domains.isBlank() ? "" : domains + ", ") + httpsMode
+                    + ", " + config.getProxy() + ", app on port " + config.getPort());
         }
     }
 
@@ -2278,11 +2356,12 @@ public class Deploy {
         final CheckboxGroup<Preset> presets = new CheckboxGroup<>("Presets");
         final TextField jvmOpts = new TextField("Extra JVM options");
         final TextField userGroups = new TextField("Extra groups for the app user");
+        final TextArea env = new TextArea("Environment variables");
         final Supplier<InitConfig> config;
 
         HardwareSection(Supplier<InitConfig> config) {
-            super("Hardware access and JVM options",
-                    "Groups are added to the app user, flags to the java command line.");
+            super("Hardware access, JVM options and environment",
+                    "Groups are added to the app user, flags to the java command line.", true);
             this.config = config;
             presets.setItemLabelGenerator(Preset::label);
             presets.addValueChangeListener(e -> {
@@ -2290,8 +2369,12 @@ public class Deploy {
             });
             jvmOpts.setHelperText("Space-separated");
             userGroups.setHelperText("Comma-separated");
+            env.setPlaceholder("KEY=VALUE, one per line");
+            env.setHelperText("Stored on the server only, never in the local config file. "
+                    + "Values with spaces must be quoted: KEY=\"value with spaces\"");
             form.add(presets, 2);
             form.add(withClear(jvmOpts), withClear(userGroups));
+            form.add(env, 2);
         }
 
         HorizontalLayout withClear(TextField field) {
@@ -2361,6 +2444,12 @@ public class Deploy {
                         && opts.containsAll(needOpts) && groups.containsAll(needGroups);
             }).collect(Collectors.toSet());
             if (!ticked.equals(presets.getValue())) presets.setValue(ticked);
+            var parts = new ArrayList<String>();
+            if (!opts.isEmpty()) parts.add(opts.size() + " JVM option" + (opts.size() == 1 ? "" : "s"));
+            if (!groups.isEmpty()) parts.add(groups.size() + " extra group" + (groups.size() == 1 ? "" : "s"));
+            long vars = c.getEnv() == null ? 0 : c.getEnv().lines().filter(l -> !l.isBlank()).count();
+            if (vars > 0) parts.add(vars + " environment variable" + (vars == 1 ? "" : "s"));
+            summary.setText(parts.isEmpty() ? "None" : String.join(", ", parts));
         }
 
         static LinkedHashSet<String> tokens(String value, String separator) {
@@ -2383,7 +2472,7 @@ public class Deploy {
         final TextField activeUsersPath = new TextField("Active users path");
 
         BlueGreenSection() {
-            super("Zero-downtime deployment", null);
+            super("Zero-downtime deployment", null, true);
             blueGreen.setTooltipText("Starts the new version next to the old one; needs memory for two JVMs, not recommended for low-end servers");
             gracefulDrain.setTooltipText("Keeps existing sessions on the old version until they end or the drain timeout passes");
             managementPort.setHelperText("Blank for the app port");
@@ -2397,6 +2486,9 @@ public class Deploy {
             for (var field : List.of(slotCookie, drainTimeout, managementPort, notifyPath, activeUsersPath)) {
                 field.setVisible(c.isBlueGreen() && c.isGracefulDrain());
             }
+            summary.setText(!c.isBlueGreen() ? "Off, the app restarts in place"
+                    : c.isGracefulDrain() ? "Blue-green with graceful drain, up to " + c.getDrainTimeout() + " s"
+                    : "Blue-green");
         }
     }
 
@@ -2406,7 +2498,7 @@ public class Deploy {
         final Checkbox exposeNodes = new Checkbox();
 
         SecuritySection() {
-            super("Security", null);
+            super("Security", null, true);
             autoUpdates.setHelperText("unattended-upgrades, rebooting at 02:00 when an update needs it");
             form.add(autoUpdates, firewall, exposeNodes);
         }
@@ -2416,18 +2508,9 @@ public class Deploy {
             exposeNodes.setVisible(c.isFirewall() && c.isWebService());
             int p = InitConfig.isPort(c.getPort()) ? Integer.parseInt(c.getPort().trim()) : 8080;
             exposeNodes.setLabel("Open app port " + (c.isBlueGreen() ? p + "/" + (p + 1) : String.valueOf(p)) + " for direct access");
-        }
-    }
-
-    static class EnvSection extends FormSection {
-        final TextArea env = new TextArea("Environment variables");
-
-        EnvSection() {
-            super("Environment", "Stored on the server only, never in the local config file.");
-            env.setPlaceholder("KEY=VALUE, one per line");
-            env.setHelperText("Values with spaces must be quoted: KEY=\"value with spaces\"");
-            env.setWidthFull();
-            form.add(env, 2);
+            summary.setText((c.isAutoUpdates() ? "Automatic security updates" : "No automatic updates")
+                    + (c.isFirewall() ? ", firewall" + (c.isExposeNodes() && c.isWebService() ? " with the app port open" : "")
+                    : ", no firewall"));
         }
     }
 

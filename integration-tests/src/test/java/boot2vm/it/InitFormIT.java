@@ -105,12 +105,19 @@ class InitFormIT {
 
         // A fresh project asks for the target's name
         field("Target name").fill("vm1");
+        var initialize = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Initialize server"));
+        // Nothing to initialize without the required host
+        assertThat(initialize).isDisabled();
         field("Host").fill("vm1");
+        assertThat(initialize).isEnabled();
         field("App user").fill("hello");
+        // Optional parts are collapsed: open the ones to change
+        openSection("Hardware access, JVM options and environment");
         field("Environment variables").fill("GREETING=browser");
+        openSection("Security");
         page.getByRole(AriaRole.CHECKBOX, new Page.GetByRoleOptions().setName("Install security updates automatically")).uncheck();
         pause();
-        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Initialize server")).click();
+        initialize.click();
         assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Setting up vm1"))).isVisible();
 
         // The window follows the setup through the terminal output
@@ -227,6 +234,10 @@ class InitFormIT {
     }
 
     /** The input of the form field with exactly this label. */
+    void openSection(String title) {
+        page.getByText(title, new Page.GetByTextOptions().setExact(true)).click();
+    }
+
     Locator field(String label) {
         return page.getByLabel(label, new Page.GetByLabelOptions().setExact(true));
     }
@@ -240,7 +251,7 @@ class InitFormIT {
             }
             try {
                 page.navigate(workstation.formUrl());
-                page.waitForSelector("vaadin-button");
+                page.waitForSelector("vaadin-text-field");
                 return;
             } catch (PlaywrightException e) {
                 if (System.currentTimeMillis() > deadline) throw e;

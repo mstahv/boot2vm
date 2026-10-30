@@ -10,6 +10,7 @@ import com.microsoft.playwright.PlaywrightException;
 import com.microsoft.playwright.assertions.LocatorAssertions;
 import com.microsoft.playwright.options.AriaRole;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -36,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The Vaadin example with graceful blue-green deployments: set the server up with
  * the init form, then deploy a new version while two users are using the app. The
  * one in a view marked for automatic upgrades is moved right away, the other one
- * is told about the new version and moves when clicking "Update now!".
+ * is told about the new version and moves when clicking "Update now".
  * <p>
  * The deploy is followed in the deploy window. A third deploy shows its "Move them
  * now" button, for a user who doesn't get around to updating.
@@ -95,18 +96,25 @@ class GracefulDrainIT {
         if (network != null) network.close();
     }
 
+    @AfterEach
+    void stopDeploy() {
+        // A failed test may leave its Deploy serving a window
+        workstation.sh("/work", "pkill -f '[D]eploy.java' || true");
+    }
+
     @Test
     @Order(1)
     void initSetsUpGracefulBlueGreen() throws Exception {
         var window = new Window("1-init");
         var page = window.page;
         var init = workstation.initWithForm(app);
-        open(page, workstation.formUrl(), init, "vaadin-button");
+        open(page, workstation.formUrl(), init, "vaadin-text-field");
 
         field(page, "Target name").fill("vm1");
         field(page, "Host").fill("vm1");
         field(page, "App user").fill("demo");
         pause(page);
+        page.getByText("Zero-downtime deployment", new Page.GetByTextOptions().setExact(true)).click();
         checkbox(page, "Blue-green deployment").check();
         checkbox(page, "Graceful drain").check();
         field(page, "Drain timeout (seconds)").fill("180");
@@ -152,14 +160,14 @@ class GracefulDrainIT {
         timeline("auto-upgraded");
         assertThat(auto.page.getByText("Graceful Blue-Green Demo, version 2")).isVisible();
 
-        assertThat(pinned.page.getByText("New version available!")).isVisible();
+        assertThat(pinned.page.getByText("A new version is available").first()).isVisible();
         timeline("new version announced");
         assertThat(pinned.page.getByText("Graceful Blue-Green Demo, version 2")).not().isVisible();
         // The deploy waits for the user who stays
         assertThat(window.page.getByText("1 user is still on the old version")).isVisible();
         // Let the user finish what they were doing, then update
         pinned.page.waitForTimeout(VIDEO_DIR != null ? 8000 : 1000);
-        pinned.page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Update now!")).click();
+        pinned.page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Update now").setExact(true)).first().click();
         timeline("update clicked");
         assertThat(pinned.page.getByText("Welcome to the new version!")).isVisible();
         assertThat(pinned.page.getByText("Graceful Blue-Green Demo, version 2")).isVisible();
@@ -204,7 +212,7 @@ class GracefulDrainIT {
                 .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(Duration.ofMinutes(15).toMillis()));
         timeline("move: drain shown");
         assertThat(window.page.getByText(Pattern.compile("moved anyway in \\d+:\\d\\d"))).isVisible();
-        assertThat(user.page.getByText("New version available!")).isVisible();
+        assertThat(user.page.getByText("A new version is available").first()).isVisible();
         window.page.waitForTimeout(VIDEO_DIR != null ? 6000 : 1000);
         window.page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Move them now")).click();
         timeline("move: clicked");

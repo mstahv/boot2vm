@@ -76,7 +76,7 @@ public class Promo {
                 caption("Version 2 is up: the users are told about it", 0, 3.2),
                 caption("B is already on version 2. A sees a countdown and keeps working,\nthe deploy waits for them.",
                         3.2, clicked - announced + 3),
-                caption("A clicks \"Update now!\" when it suits them.\nNo one is left on version 1: the deploy stops it.",
+                caption("A clicks \"Update now\" when it suits them.\nNo one is left on version 1: the deploy stops it.",
                         clicked - announced + 3, 99));
 
         if (timeline.containsKey(DEPLOY_MOVE.name())) {
