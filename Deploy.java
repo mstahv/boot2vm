@@ -12,20 +12,25 @@ import com.vaadin.flow.component.checkbox.Checkbox;
 import com.vaadin.flow.component.checkbox.CheckboxGroup;
 import com.vaadin.flow.component.combobox.ComboBox;
 import com.vaadin.flow.component.formlayout.FormLayout;
+import com.vaadin.flow.component.html.Anchor;
 import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.component.html.H2;
 import com.vaadin.flow.component.html.H3;
 import com.vaadin.flow.component.html.Paragraph;
+import com.vaadin.flow.component.html.Pre;
 import com.vaadin.flow.component.html.Span;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
+import com.vaadin.flow.component.progressbar.ProgressBar;
 import com.vaadin.flow.component.select.Select;
 import com.vaadin.flow.component.textfield.TextArea;
 import com.vaadin.flow.component.textfield.TextField;
 import com.vaadin.flow.router.PageTitle;
 import com.vaadin.flow.router.Route;
+import com.vaadin.flow.dom.Style;
 import com.vaadin.flow.server.ServiceInitEvent;
+import com.vaadin.flow.shared.Registration;
 import com.vaadin.flow.theme.aura.Aura;
 import com.vaadin.open.Open;
 import in.virit.widgetset.jbang.ViritinJBangAutoconfiguration;
@@ -41,9 +46,11 @@ import java.util.*;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class Deploy {
@@ -1052,15 +1059,14 @@ public class Deploy {
         // additions leave no anonymous "default" whose host nobody remembers.
         boolean askName = selected.isEmpty() && allTargets().isEmpty();
 
-        InitResult result;
         String noGui = ui == null ? guiUnavailableReason() : null;
         if ("tui".equals(ui) || noGui != null) {
             if (noGui != null) System.out.println(noGui + ", using the terminal UI.");
-            result = promptInit(targetName, askName, from);
+            InitResult result = promptInit(targetName, askName, from);
+            runInit(result.target(), result.config());
         } else {
-            result = InitGui.run(targetName, askName, from);
+            InitGui.run(targetName, askName, from);
         }
-        runInit(result.target(), result.config());
     }
 
     record InitResult(Target target, InitConfig config) {}
@@ -1520,19 +1526,20 @@ public class Deploy {
 
     /**
      * Runs the init form as a local Spring Boot app on a random port and opens it
-     * in the browser. The form only collects the settings: provisioning runs in
-     * the terminal as before, once the form is submitted and the server is closed.
+     * in the browser. Once the form is submitted, the setup runs as in the terminal
+     * UI, and the window follows its progress until it is done.
      */
     @SpringBootApplication(exclude = ViritinJBangAutoconfiguration.class)
     public static class InitGui {
         static String initialTarget, from;
         static boolean askName;
         static final CompletableFuture<InitResult> result = new CompletableFuture<>();
+        static final Progress progress = new Progress();
         static final Set<UI> windows = ConcurrentHashMap.newKeySet();
         /** Seconds between heartbeats of an open window, and silence after which init gives up. */
         static final int HEARTBEAT = 5, GIVE_UP = 30;
 
-        static InitResult run(String targetName, boolean askName, String from) throws Exception {
+        static void run(String targetName, boolean askName, String from) throws Exception {
             InitGui.initialTarget = targetName;
             InitGui.askName = askName;
             InitGui.from = from;
@@ -1544,20 +1551,47 @@ public class Deploy {
             var watchdog = Executors.newSingleThreadScheduledExecutor();
             watchdog.scheduleWithFixedDelay(() -> {
                 long now = System.currentTimeMillis();
-                if (!windows.isEmpty() && windows.stream().allMatch(ui ->
+                if (!result.isDone() && !windows.isEmpty() && windows.stream().allMatch(ui ->
                         now - ui.getInternals().getLastHeartbeatTimestamp() > GIVE_UP * 1000L)) {
                     System.out.println("The init form window was closed");
                     result.cancel(false);
                 }
             }, HEARTBEAT, HEARTBEAT, TimeUnit.SECONDS);
             try {
-                return result.get();
-            } catch (CancellationException e) {
-                throw new CommandFailed("Init cancelled, nothing was written", 1);
+                InitResult init;
+                try {
+                    init = result.get();
+                } catch (CancellationException e) {
+                    throw new CommandFailed("Init cancelled, nothing was written", 1);
+                }
+                follow(() -> runInit(init.target(), init.config()));
             } finally {
                 watchdog.shutdownNow();
                 Thread.sleep(500); // let the last response reach the browser
                 context.close();
+            }
+        }
+
+        interface Setup { void run() throws Exception; }
+
+        /** Run the setup, copying everything it prints to the progress shown in the window. */
+        static void follow(Setup setup) throws Exception {
+            PrintStream out = System.out, err = System.err;
+            System.setOut(new PrintStream(progress.new Tee(out), true, out.charset()));
+            System.setErr(new PrintStream(progress.new Tee(err), true, err.charset()));
+            captureOutput = true;
+            try {
+                setup.run();
+                progress.finish(null);
+            } catch (Exception e) {
+                progress.finish(e.getMessage() != null ? e.getMessage() : e.toString());
+                throw e;
+            } finally {
+                captureOutput = false;
+                System.setOut(out);
+                System.setErr(err);
+                // Give an open window its next poll to show how it ended
+                progress.shown.await(3, TimeUnit.SECONDS);
             }
         }
 
@@ -1583,6 +1617,171 @@ public class Deploy {
                 windows.add(ui);
                 ui.addDetachListener(detach -> windows.remove(ui));
             });
+        }
+    }
+
+    /**
+     * What the setup has printed so far: the last lines, the current step and a rough
+     * share done, judged by the steps it announces.
+     */
+    static class Progress {
+        static final int TAIL = 14;
+        /** The steps the setup prints, with how far along each one starts. */
+        static final Map<String, Double> STEPS = Map.ofEntries(
+                Map.entry("Initializing server", 0.02),
+                Map.entry("--- Configuring unattended-upgrades", 0.06),
+                Map.entry("--- Installing JDK", 0.1),
+                Map.entry("--- Creating user", 0.4),
+                Map.entry("--- Installing systemd", 0.45),
+                Map.entry("--- Installing Caddy", 0.5),
+                Map.entry("--- Configuring firewall", 0.6),
+                Map.entry("Writing environment variables", 0.65),
+                Map.entry("Server initialized", 0.68),
+                Map.entry("Building application", 0.7),
+                Map.entry("Syncing to server", 0.85),
+                Map.entry("Running blue-green", 0.92),
+                Map.entry("Restarting service", 0.95));
+        final Deque<String> tail = new ArrayDeque<>();
+        final CountDownLatch shown = new CountDownLatch(1);
+        String step = "Starting";
+        double done;
+        boolean finished;
+        String failure;
+
+        record Snapshot(String step, double done, String tail, boolean finished, String failure) {}
+
+        synchronized Snapshot snapshot() {
+            return new Snapshot(step, done, String.join("\n", tail), finished, failure);
+        }
+
+        synchronized void line(String line) {
+            line = line.replaceAll("\u001B\\[[0-9;?]*[A-Za-z]", "");
+            tail.add(line);
+            if (tail.size() > TAIL) tail.removeFirst();
+            var banner = Pattern.compile("^(?:---|===) (.+?) (?:---|===)$").matcher(line);
+            if (banner.matches()) step = banner.group(1);
+            for (var s : STEPS.entrySet()) {
+                if (line.startsWith(s.getKey())) {
+                    if (!line.startsWith("-")) step = line.replaceFirst(" \\.\\.\\.$", "");
+                    done = Math.max(done, s.getValue());
+                }
+            }
+        }
+
+        synchronized void finish(String failure) {
+            finished = true;
+            this.failure = failure;
+            if (failure == null) done = 1;
+        }
+
+        /** Passes output on to the terminal, and its lines to the progress. */
+        class Tee extends OutputStream {
+            final OutputStream terminal;
+            final ByteArrayOutputStream current = new ByteArrayOutputStream();
+            boolean carriageReturn;
+
+            Tee(OutputStream terminal) {
+                this.terminal = terminal;
+            }
+
+            @Override
+            public synchronized void write(int b) throws IOException {
+                terminal.write(b);
+                // A lone \r is a progress meter redrawing its line, \r\n just ends one (ssh does that)
+                if (carriageReturn && b != '\n') current.reset();
+                carriageReturn = b == '\r';
+                if (b == '\n') {
+                    line(current.toString(java.nio.charset.StandardCharsets.UTF_8));
+                    current.reset();
+                } else if (b != '\r') {
+                    current.write(b);
+                }
+            }
+
+            @Override
+            public synchronized void write(byte[] b, int off, int len) throws IOException {
+                for (int i = off; i < off + len; i++) write(b[i]);
+            }
+
+            @Override
+            public void flush() throws IOException {
+                terminal.flush();
+            }
+        }
+    }
+
+    /** Replaces the form once it is submitted: follows the setup until it ends. */
+    public static class SetupView extends VerticalLayout {
+        final InitResult init;
+        final H2 title;
+        final Span step = new Span();
+        final ProgressBar bar = new ProgressBar();
+        final Output output = new Output();
+        Registration polling;
+
+        SetupView(InitResult init) {
+            this.init = init;
+            title = new H2("Setting up " + init.config().getHost());
+            setPadding(false);
+            bar.setWidthFull();
+            add(title, new Paragraph("The settings went to " + init.target().path()
+                    + ". Below is the latest output, the terminal has all of it."), step, bar, output);
+            addAttachListener(e -> {
+                e.getUI().setPollInterval(500);
+                polling = e.getUI().addPollListener(p -> update());
+                update();
+            });
+        }
+
+        void update() {
+            var p = InitGui.progress.snapshot();
+            step.setText(p.step());
+            bar.setValue(p.done());
+            output.setText(p.tail());
+            if (!p.finished()) return;
+
+            polling.remove();
+            getUI().ifPresent(ui -> {
+                ui.setPollInterval(-1);
+                ui.beforeClientResponse(this, ctx -> InitGui.progress.shown.countDown());
+            });
+            if (p.failure() == null) {
+                title.setText("@" + init.target().name() + " is ready");
+                step.setText("Server set up and app deployed. You can close this window.");
+                String url = appUrl();
+                if (url != null) add(new Paragraph(new Anchor(url, "Open " + url)));
+            } else {
+                title.setText("Setup failed");
+                bar.setVisible(false);
+                step.setText(p.failure());
+                step.getStyle().setColor("var(--aura-red, #c62828)").setFontWeight(Style.FontWeight.BOLD);
+                add(new Paragraph("Fix the problem and run init again, the form will start from the settings in "
+                        + init.target().path() + "."));
+            }
+        }
+
+        /** Where the deployed app answers, null if it is not a web service. */
+        String appUrl() {
+            InitConfig c = init.config();
+            if (!c.isWebService()) return null;
+            String scheme = "no".equals(c.getHttps()) ? "http" : "https";
+            return scheme + "://" + c.getDomain().split(" ")[0] + "/";
+        }
+
+        static class Output extends Pre {
+            Output() {
+                setWidthFull();
+                getStyle().setMinHeight(Progress.TAIL * 1.4 + "em")
+                        .setMargin("0")
+                        .setPadding("0.75em")
+                        .setBoxSizing(Style.BoxSizing.BORDER_BOX)
+                        .setBorderRadius("6px")
+                        .setBackgroundColor("rgba(127, 127, 127, 0.12)")
+                        .setFontSize("0.8em")
+                        .setLineHeight("1.4")
+                        .setWhiteSpace(Style.WhiteSpace.PRE_WRAP)
+                        .setOverflow(Style.Overflow.HIDDEN);
+            }
         }
     }
 
@@ -1678,12 +1877,10 @@ public class Deploy {
                 Notification.show("Check the highlighted fields");
                 return;
             }
-            Target t = target.target();
+            var init = new InitResult(target.target(), c);
             removeAll();
-            add(new H2("Setting up " + c.getHost()));
-            add(new Paragraph("The settings go to " + t.path() + " and the server setup continues in the terminal. "
-                    + "You can close this window."));
-            InitGui.result.complete(new InitResult(t, c));
+            add(new SetupView(init));
+            InitGui.result.complete(init);
         }
 
         class Buttons extends HorizontalLayout {
@@ -2776,12 +2973,20 @@ public class Deploy {
         }
     }
 
+    /** Set while the init form follows the setup: commands then write through System.out, which it copies. */
+    static boolean captureOutput;
+
     static void run(String... cmd) throws Exception {
         System.out.println("  > " + String.join(" ", cmd));
-        int exit = new ProcessBuilder(cmd)
-                .inheritIO()
-                .start()
-                .waitFor();
+        var builder = new ProcessBuilder(cmd);
+        if (captureOutput) {
+            builder.redirectInput(ProcessBuilder.Redirect.INHERIT).redirectErrorStream(true);
+        } else {
+            builder.inheritIO();
+        }
+        var process = builder.start();
+        if (captureOutput) process.getInputStream().transferTo(System.out);
+        int exit = process.waitFor();
         if (exit != 0) {
             throw new CommandFailed("Command failed with exit code " + exit + ": " + String.join(" ", cmd), exit);
         }

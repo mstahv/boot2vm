@@ -86,7 +86,7 @@ Deploy logs @pi2
 
 ### `Deploy init`
 
-Interactive one-time setup. Opens a form in your browser for the connection details and other settings, writes a `vmhosting.conf` in the current directory, then provisions the server, with the progress shown in the terminal.
+Interactive one-time setup. Opens a form in your browser for the connection details and other settings, writes a `vmhosting.conf` in the current directory, then provisions the server. The window follows the setup with a progress bar and the latest lines of the terminal output, and ends with a link to the app, or with the error and the output that led to it.
 
 The form shows all settings at once, hides the ones that don't apply (no domains for a headless service, no drain settings without blue-green, ...), and checks the values before anything is written. The hardware presets are checkboxes that stay in sync with the JVM options and groups below them. Inherited values are visible right away and can be cleared with a click. Closing the window (or the *Cancel* button) cancels init without writing anything.
 

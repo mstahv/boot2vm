@@ -7,6 +7,7 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.PlaywrightException;
+import com.microsoft.playwright.assertions.LocatorAssertions;
 import com.microsoft.playwright.options.AriaRole;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -31,8 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Init with the form in the browser: fill it in for a fresh server, then check
- * that settings inherited from another target are shown and can be cleared.
+ * Init with the form in the browser: fill it in for a fresh server and follow the
+ * setup, check that settings inherited from another target are shown and can be
+ * cleared, and that a failing setup is reported in the window.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class InitFormIT {
@@ -109,16 +111,21 @@ class InitFormIT {
         pause();
         page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Initialize server")).click();
         assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Setting up vm1"))).isVisible();
-        pause();
-        // The setup continues in the terminal, nothing more to see on the form
-        closeAndSaveVideo(page);
 
-        var result = init.get(10, TimeUnit.MINUTES);
+        // The window follows the setup through the terminal output
+        var output = page.locator("pre");
+        assertThat(output).containsText("Installing JDK", new LocatorAssertions.ContainsTextOptions().setTimeout(120_000));
+        assertThat(page.locator("vaadin-progress-bar")).isVisible();
+        assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("@vm1 is ready")))
+                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(600_000));
+        assertThat(output).containsText("Deployed successfully to @vm1");
+        pause();
+
+        var result = init.get(1, TimeUnit.MINUTES);
         assertEquals(0, result.exitCode(), "init failed");
         assertTrue(result.output().contains("Deployed successfully to @vm1"));
         workstation.awaitHttp("http://vm1/", "v1 browser"::equals, Duration.ofSeconds(30));
-        page = context.newPage();
-        page.navigate("http://vm1/");
+        page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName("Open http://vm1/")).click();
         assertThat(page.locator("body")).hasText("v1 browser");
         pause();
         String conf = workstation.sh(app, "cat vmhosting.vm1.conf").output();
@@ -175,6 +182,26 @@ class InitFormIT {
         assertEquals(1, result.exitCode(), "a cancelled init must fail");
         assertTrue(result.output().contains("Init cancelled, nothing was written"));
         assertEquals(1, workstation.sh(app, "test -e vmhosting.vm2.conf").exitCode(), "vmhosting.vm2.conf was written");
+    }
+
+    @Test
+    @Order(3)
+    void failedSetupIsReportedInTheWindow() throws Exception {
+        var init = workstation.initWithForm(app, "@nowhere");
+        openForm(init);
+
+        field("Host").fill("nowhere.invalid");
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Initialize server")).click();
+
+        assertThat(page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Setup failed")))
+                .isVisible(new LocatorAssertions.IsVisibleOptions().setTimeout(60_000));
+        assertThat(page.getByText(Pattern.compile("^Command failed with exit code"))).isVisible();
+        // The output that explains it stays in the window
+        assertThat(page.locator("pre")).containsText("Could not resolve hostname nowhere.invalid");
+        pause();
+
+        var result = init.get(1, TimeUnit.MINUTES);
+        assertTrue(result.exitCode() != 0, "a failed setup must fail init");
     }
 
     /** Videos are per page: the pages of a test are saved as testName-1.webm, testName-2.webm, ... */

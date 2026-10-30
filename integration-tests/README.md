@@ -36,7 +36,7 @@ Each command run in a container is echoed to the test output, see `target/failsa
 Done:
 
 - `PlainAppIT`: init a fresh server with the terminal UI (checking the suggested defaults), serve a plain jar through Caddy with an env var from init, redeploy a changed version.
-- `InitFormIT`: the same with the init form, filled in with Playwright; then a new target that inherits Raspberry Pi settings from the first: the presets show them, unticking and *Clear* remove them, and *Cancel* writes nothing.
+- `InitFormIT`: the same with the init form, filled in with Playwright, following the setup in the window to the link to the app; a host that doesn't resolve, reported in the window with the ssh error; and a new target that inherits Raspberry Pi settings from the first: the presets show them, unticking and *Clear* remove them, and *Cancel* writes nothing.
 
 TODO:
 
