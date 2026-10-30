@@ -7,7 +7,7 @@ These tests run `Deploy.java` for real, against Docker containers that act as se
 
 Both containers share a Docker network, where the server is reachable by its name (for example `vm1`).
 
-The terminal UI is driven by `images/workstation/drive.py`, a small expect-like script. `Prompts` lists the questions in order, each with an answer or with the default it should suggest. A question that is added, removed or reordered makes the test stop at that prompt with the output so far, instead of feeding answers into the wrong questions.
+The terminal UI is driven by `images/workstation/Drive.java`, a small expect-like JBang script that gets a terminal for Deploy from `script`. `Prompts` lists the questions in order, each with an answer or with the default it should suggest. A question that is added, removed or reordered makes the test stop at that prompt with the output so far, instead of feeding answers into the wrong questions.
 
 ## Running
 

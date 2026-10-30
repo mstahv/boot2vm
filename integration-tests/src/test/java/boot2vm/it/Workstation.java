@@ -52,8 +52,8 @@ public class Workstation extends GenericContainer<Workstation> {
 
     /** Run Deploy.java interactively, answering its prompts as the script says. */
     Result deployInteractively(String dir, Prompts prompts, String... args) {
-        copyFileToContainer(Transferable.of(prompts.toJson()), "/tmp/prompts.json");
-        return sh(dir, "python3 /usr/local/bin/drive.py /tmp/prompts.json -- jbang /work/Deploy.java "
+        copyFileToContainer(Transferable.of(prompts.toScript()), "/tmp/prompts.txt");
+        return sh(dir, "jbang /usr/local/bin/Drive.java /tmp/prompts.txt -- jbang /work/Deploy.java "
                 + String.join(" ", args));
     }
 

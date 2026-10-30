@@ -2,6 +2,7 @@ package boot2vm.it;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * The answers for an interactive Deploy run, in the order the prompts appear.
@@ -17,32 +18,22 @@ public class Prompts {
 
     /** Answer the prompt that starts with the label. */
     Prompts answer(String label, String value) {
-        steps.add(new Step(escape(label) + "[^\\n]*: $", value));
+        steps.add(new Step(Pattern.quote(label) + "[^\\n]*: $", value));
         return this;
     }
 
     /** Check that the prompt suggests the expected default, and take it. */
     Prompts accept(String label, String expectedDefault) {
-        steps.add(new Step(escape(label) + "[^\\n]*\\[" + escape(expectedDefault) + "\\]: $", ""));
+        steps.add(new Step(Pattern.quote(label) + "[^\\n]*\\[" + Pattern.quote(expectedDefault) + "\\]: $", ""));
         return this;
     }
 
-    /** Escape regex metacharacters; the steps are matched by Python, which has no \Q...\E. */
-    static String escape(String text) {
-        return text.replaceAll("[\\\\.^$|?*+()\\[\\]{}]", "\\\\$0");
-    }
-
-    String toJson() {
-        var json = new StringBuilder("[");
+    /** The steps for Drive.java: a regex, a tab and the answer on each line. */
+    String toScript() {
+        var script = new StringBuilder();
         for (Step step : steps) {
-            if (json.length() > 1) json.append(",");
-            json.append("{\"expect\":").append(quote(step.expect()))
-                    .append(",\"send\":").append(quote(step.send())).append("}");
+            script.append(step.expect()).append('\t').append(step.send()).append('\n');
         }
-        return json.append("]").toString();
-    }
-
-    static String quote(String value) {
-        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+        return script.toString();
     }
 }
