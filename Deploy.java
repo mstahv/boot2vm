@@ -136,10 +136,13 @@ public class Deploy {
             apt_update() {
                 if [ -z "$APT_UPDATED" ]; then apt-get update; APT_UPDATED=1; fi
             }
+            pkg_installed() {
+                dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+            }
             apt_install() {
                 local missing=() p
                 for p in "$@"; do
-                    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || missing+=("$p")
+                    pkg_installed "$p" || missing+=("$p")
                 done
                 [ ${#missing[@]} -eq 0 ] && return 0
                 if [ -z "$(find /var/lib/apt/lists -maxdepth 1 -type f -name '*Release' -mtime -7 2>/dev/null | head -n1)" ]; then
@@ -192,20 +195,30 @@ public class Deploy {
             echo "--- Installing JDK 25 (provider: $JDK_PROVIDER) ---"
             case "$JDK_PROVIDER" in
                 zulu)
-                    apt_install gnupg ca-certificates curl
-                    curl -s https://repos.azul.com/azul-repo.key | gpg --dearmor -o /usr/share/keyrings/azul.gpg
-                    chmod 644 /usr/share/keyrings/azul.gpg
-                    echo "deb [signed-by=/usr/share/keyrings/azul.gpg] https://repos.azul.com/zulu/deb stable main" \\
-                        > /etc/apt/sources.list.d/zulu.list
-                    apt_install zulu25-jdk
+                    # On a re-run the JDK is already there and its repository set up (upgrades come from apt)
+                    if pkg_installed zulu25-jdk; then
+                        echo "Azul Zulu 25 is already installed"
+                    else
+                        apt_install gnupg ca-certificates curl
+                        # --yes: an earlier init left the key behind, and gpg would ask (with no one to answer)
+                        curl -fsSL https://repos.azul.com/azul-repo.key | gpg --dearmor --yes -o /usr/share/keyrings/azul.gpg
+                        chmod 644 /usr/share/keyrings/azul.gpg
+                        echo "deb [signed-by=/usr/share/keyrings/azul.gpg] https://repos.azul.com/zulu/deb stable main" \\
+                            > /etc/apt/sources.list.d/zulu.list
+                        apt_install zulu25-jdk
+                    fi
                     ;;
                 temurin)
-                    apt_install wget apt-transport-https gpg
-                    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
-                        | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
-                    echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" \\
-                        > /etc/apt/sources.list.d/adoptium.list
-                    apt_install temurin-25-jdk
+                    if pkg_installed temurin-25-jdk; then
+                        echo "Eclipse Temurin 25 is already installed"
+                    else
+                        apt_install wget apt-transport-https gpg
+                        wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \\
+                            | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg
+                        echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" \\
+                            > /etc/apt/sources.list.d/adoptium.list
+                        apt_install temurin-25-jdk
+                    fi
                     ;;
                 semeru)
                     # IBM Semeru (OpenJ9 VM) has no apt repository: install the latest GitHub release tarball
@@ -781,7 +794,9 @@ public class Deploy {
         String from = null;
         // How init asks: "tui", "gui", or null to pick the form when a browser can be opened
         String ui = "1".equals(System.getenv("BOOT2VM_TUI")) || "true".equalsIgnoreCase(System.getenv("BOOT2VM_TUI")) ? "tui" : null;
-        for (int i = 0; i < rawArgs.length; i++) {
+        // Some "jbang app install" wrappers (seen on Fedora) pass an extra "Deploy" as the first argument
+        int first = rawArgs.length > 0 && "Deploy".equals(rawArgs[0]) ? 1 : 0;
+        for (int i = first; i < rawArgs.length; i++) {
             String arg = rawArgs[i];
             if ("--tui".equals(arg) || "--gui".equals(arg)) {
                 ui = arg.substring(2);
